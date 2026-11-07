@@ -159,6 +159,22 @@ microtask queue. A JS async function runs synchronously until its first
 `RefCell`-based state. Spool's ordering is the same as
 `queueMicrotask(() => asyncFn())`. This intentional difference is documented.
 
+**D4a. Main's first poll is a macrotask (the "script").** `run` and `block_on`
+poll the main future once directly, outside the microtask queue, the way a
+JS program's top-level code runs. Ticks and microtasks it queues run after it,
+ticks first. Later polls of main (after an `.await`) are microtasks, like any
+other task. Before that first poll, any work already queued on the runtime
+(left over from an earlier `block_on`, or spawned with `Runtime::spawn`) is
+drained first, keeping Node's invariant that the queues are empty when a
+macrotask starts. *(Settled in M2.)*
+
+**D4b. Awaiting a ready future doesn't yield.** In JS, `await x` always
+takes at least one microtask hop, even when `x` is already resolved. In Rust,
+`.await` on a future that is already `Ready` (for example, the `JoinHandle` of
+a task that has finished) continues synchronously, without a hop. This is an
+inherent difference between Rust and JS. Node parity scenarios avoid it, and
+the documentation states it. *(Settled in M2.)*
+
 ### 3.2 Draining "between macrotasks"
 
 This is the same loop as Node's `processTicksAndRejections`:
@@ -667,8 +683,8 @@ None that block implementation.
 |---|---|---|
 | M0 | Scaffold | Crate, CI matrix, lint/fmt/doc gates, test harness skeleton, Node-parity runner |
 | M1 | Core loop | `Runtime`, `block_on`, context, task slab, `Wake`-based waker, microtask queue, `spawn`, `JoinHandle`, `yield_now`, plus their unit and re-entrancy tests |
-| M2 | JS queues | `queue_microtask`, `next_tick`, drain semantics; ordering scenarios 1, 2, 6, 9, 10; reference model + `proptest` |
+| M2 | JS queues | `queue_microtask`, `next_tick`, drain semantics; ordering scenarios 1, 2, 6, 9, 10; reference model + `proptest`; basic `run` (queues-only liveness, pulled forward from M5 so Node parity scenarios can run to completion) |
 | M3 | Timers | `Clock`, `MockClock`, `ThreadPark`, timer heap, `sleep`, `sleep_until`, `timeout`, `set_timeout`, `set_interval`, `interval`; scenarios 3–5, 7, 8; timer tests |
 | M4 | Cancellation & panics | `abort`, `AbortHandle`, `abort_on_drop`, `try_join`, `TimerHandle::cancel`, `catch_unwind` + unobserved-panic path, poisoning; cancel, panic, and drop/leak tests |
-| M5 | Liveness & threads | `run` vs `block_on`, stall detection, remote wakes; liveness and thread tests; randomized Node differential tests |
+| M5 | Liveness & threads | Full liveness for `run` (timers, `KeepAlive`), stall-detection hardening, remote wakes; liveness and thread tests; randomized Node differential tests |
 | M6 | Polish | Rustdoc with JS-equivalence tables, examples, stress tests, benchmarks (spawn, wake, timer throughput) to give §9.6 a baseline, coverage gate |

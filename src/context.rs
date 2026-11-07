@@ -38,7 +38,7 @@ pub(crate) fn enter(inner: &Rc<Inner>) -> EnterGuard {
         assert!(
             slot.is_none(),
             "spool: cannot start a runtime from inside a running Spool runtime \
-             (nested `block_on` is not supported)"
+             (nested `block_on` / `run` is not supported)"
         );
         *slot = Some(Rc::clone(inner));
     });

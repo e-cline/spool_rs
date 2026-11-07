@@ -19,10 +19,11 @@ let answer = spool::block_on(async {
 assert_eq!(answer, 42);
 ```
 
-> **Status:** early development. Milestones M0 (scaffold) and M1 (core loop:
-> `block_on`, `spawn`, `JoinHandle`, `yield_now`) are implemented. Timers,
-> `queue_microtask`, `next_tick`, cancellation, and the rest of the plan are
-> next. See [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md).
+> **Status:** early development. Milestones M0 (scaffold), M1 (core loop:
+> `block_on`, `spawn`, `JoinHandle`, `yield_now`), and M2 (`queue_microtask`,
+> `next_tick`, Node's drain order, `run`) are implemented. Timers,
+> cancellation, and the rest of the plan are next. See
+> [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md).
 
 ## Development
 
