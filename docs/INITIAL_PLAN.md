@@ -78,7 +78,8 @@ timeout 10ms      (after ~10ms; `run` returns after this)
 ```rust
 // ── Entry points ────────────────────────────────────────────────────────────
 pub fn run<F: Future + 'static>(main: F) -> F::Output;      // wait for an empty loop
-pub fn block_on<F: Future + 'static>(main: F) -> F::Output; // return as soon as `main` completes
+pub fn block_on<F: Future>(main: F) -> F::Output;           // return as soon as `main` completes
+                                                            // (no 'static: main lives on the stack)
 pub struct Runtime;   // Runtime::builder().clock(MockClock::new()).build().block_on(..)
 
 // ── Tasks ───────────────────────────────────────────────────────────────────
