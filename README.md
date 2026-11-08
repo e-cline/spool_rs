@@ -30,10 +30,12 @@ spool::run(async {
 > **Status:** early development. Implemented so far: M0 (scaffold), M1 (core
 > loop: `block_on`, `spawn`, `JoinHandle`, `yield_now`), M2 (`queue_microtask`,
 > `next_tick`, Node's drain order, `run`), M3 (timers: `sleep`,
-> `timeout`, `interval`, `set_timeout`, `set_interval`, `MockClock`), and M4
+> `timeout`, `interval`, `set_timeout`, `set_interval`, `MockClock`), M4
 > (cancellation and panics: `abort`, `AbortHandle`, `abort_on_drop`,
-> `try_join`, the JS-exception panic model, poisoning). Next up are liveness
-> and threads (M5). See [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md).
+> `try_join`, the JS-exception panic model, poisoning), and M5 (liveness and
+> threads: `KeepAlive`, stronger stall detection, randomized differential
+> tests against Node). Next up is polish (M6). See
+> [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md).
 
 ## Development
 
@@ -46,3 +48,11 @@ cargo +nightly miri test   # needs: rustup +nightly component add miri
 The Node parity tests (`tests/node_parity.rs`) run each scenario in Spool and,
 as a JS twin in `tests/node_parity/`, in Node, and require identical traces.
 Set `SPOOL_REQUIRE_NODE=1` to make a missing `node` an error instead of a skip.
+
+`tests/fuzz_ordering.rs` goes further: it generates random programs, runs
+each in Spool and (as generated JS, one worker per program) in Node, and
+compares the traces. To search harder:
+
+```sh
+SPOOL_FUZZ_CASES=5000 SPOOL_FUZZ_SEED=7 cargo test --test fuzz_ordering
+```

@@ -156,6 +156,13 @@ impl<T> Slab<T> {
         keys.into_iter().filter_map(|k| self.remove(k)).collect()
     }
 
+    pub(crate) fn values(&self) -> impl Iterator<Item = &T> + '_ {
+        self.entries.iter().filter_map(|entry| match entry {
+            Entry::Occupied { value, .. } => Some(value),
+            Entry::Vacant { .. } => None,
+        })
+    }
+
     pub(crate) fn keys(&self) -> impl Iterator<Item = Key> + '_ {
         self.entries
             .iter()

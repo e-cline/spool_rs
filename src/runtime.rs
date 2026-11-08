@@ -12,6 +12,7 @@ use std::task::{Context, Poll, Waker};
 
 use crate::clock::{Clock, Instant, SystemClock};
 use crate::context;
+use crate::keep_alive::KeepAlive;
 use crate::park;
 use crate::queue::{Callback, Microtask, Queue};
 use crate::slab::Slab;
@@ -22,7 +23,8 @@ use crate::waker::{Shared, TaskHeader};
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 const STALL_MESSAGE: &str = "spool: main future stalled: it is pending but nothing can wake it \
-     (no queued work, no timers, and no outstanding wakers)";
+     (no queued work, no timers, no `KeepAlive` guards, and no wakers outside the runtime; \
+     every pending task is stuck too)";
 
 const POISONED_MESSAGE: &str = "spool: this runtime is poisoned: a panic unwound out of an \
      earlier `run` / `block_on` call on it (create a new `Runtime` instead)";
@@ -418,19 +420,68 @@ impl Inner {
                 self.wait_until(deadline);
                 continue;
             }
+            if self.shared.is_kept_alive() {
+                // A `KeepAlive` guard exists: wait for a remote wake, or for
+                // the last guard to be dropped (which unparks us).
+                park::park(None);
+                continue;
+            }
+            // Main is pending, and the loop has nothing to do. Something can
+            // still happen only if a waker exists outside the runtime (it may
+            // be on another thread, so park until a remote wake arrives).
+            let outside = main.output.is_none() && self.has_outside_wakers(&main.header);
+            // A thread wakes (queueing a remote wake) *before* it drops its
+            // waker or its `KeepAlive`. If we just saw that drop, the wake
+            // must not be missed. The fence pairs the relaxed reference-count
+            // reads above with the release of those drops.
+            std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+            if self.shared.has_pending_remote() {
+                continue;
+            }
             if main.output.is_some() {
                 return main.take_output(); // `run`: the loop is empty.
             }
-            // Main is pending. It can only make progress if someone still
-            // holds one of its wakers (this frame holds the header once).
-            // That someone may be another thread, so park until a remote
-            // wake arrives.
-            if Arc::strong_count(&main.header) > 1 {
+            if outside {
                 park::park(None);
                 continue;
             }
             panic!("{STALL_MESSAGE}");
         }
+    }
+
+    pub(crate) fn keep_alive(&self) -> KeepAlive {
+        KeepAlive::new(Arc::clone(&self.shared))
+    }
+
+    /// The stall check (§3.5). Called when the loop is idle: no queued work,
+    /// no remote wakes, no timers, and no `KeepAlive`. Returns `true` if any
+    /// task (or main) has a waker that the runtime can't account for, which
+    /// means something might still wake it.
+    ///
+    /// Each header is referenced once by its owner (the slab, or main's
+    /// frame); every other reference is a `Waker`. A waker stored in a
+    /// pending task's `JoinHandle` state (by whoever awaits that task) is
+    /// accounted for: it only fires once that task finishes, which needs that
+    /// task to be woken first. If no header has an unaccounted waker, nothing
+    /// can ever run again: a provable stall. Any waker we can't identify
+    /// counts as outside, so this never reports a stall that isn't one.
+    fn has_outside_wakers(&self, main_header: &Arc<TaskHeader>) -> bool {
+        use std::collections::HashMap;
+
+        let tasks = self.tasks.borrow();
+        // Joiner wakers held inside the runtime, by header address.
+        let mut inside: HashMap<*const (), usize> = HashMap::new();
+        for slot in tasks.values() {
+            if let Some(data) = slot.join.joiner_waker_data() {
+                *inside.entry(data).or_default() += 1;
+            }
+        }
+        let outside = |header: &Arc<TaskHeader>| {
+            let wakers = Arc::strong_count(header) - 1;
+            let key = Arc::as_ptr(header).cast::<()>();
+            wakers > inside.get(&key).copied().unwrap_or(0)
+        };
+        outside(main_header) || tasks.values().any(|slot| outside(&slot.header))
     }
 }
 
@@ -508,6 +559,12 @@ impl Runtime {
         self.inner.now()
     }
 
+    /// Returns a [`KeepAlive`] guard for this runtime. See
+    /// [`keep_alive`](crate::keep_alive).
+    pub fn keep_alive(&self) -> KeepAlive {
+        self.inner.keep_alive()
+    }
+
     /// Spawns a task onto this runtime. The task runs once the runtime is
     /// driven by [`run`](Self::run) or [`block_on`](Self::block_on).
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
@@ -523,9 +580,11 @@ impl Runtime {
     /// output.
     ///
     /// The loop has "nothing left to do" when the tick and microtask queues
-    /// are empty and no timer is armed. As in Node, a detached task that is
-    /// pending on something else (not a timer) doesn't keep the loop alive:
-    /// it stays on the runtime, and is dropped with it.
+    /// are empty, no timer is armed, and no [`KeepAlive`] guard exists. As in
+    /// Node, a detached task that is pending on something else (not a timer)
+    /// doesn't keep the loop alive: it stays on the runtime, and is dropped
+    /// with it. Hold a `KeepAlive` while such a task waits for another
+    /// thread.
     ///
     /// Before `future` is first polled, any work already queued on the runtime
     /// (for example, tasks spawned with [`Runtime::spawn`]) runs first. The
@@ -537,8 +596,11 @@ impl Runtime {
     ///
     /// - If called from inside a running Spool runtime (nested `run` /
     ///   `block_on`).
-    /// - If `future` stalls: it is pending, no work is queued, and no `Waker`
-    ///   for it exists anywhere, so nothing can ever wake it.
+    /// - If `future` stalls: it is pending, no work is queued, no timer or
+    ///   `KeepAlive` exists, and nothing can ever wake it or any task. A
+    ///   waker that a pending task holds for whoever awaits it (as when
+    ///   `future` awaits a stuck task) doesn't count; any other waker might
+    ///   be woken (from another thread, say), so the loop parks instead.
     /// - If the runtime is poisoned (see below).
     ///
     /// Panics follow the JS-exception model. A panic unwinds out of `run`

@@ -83,6 +83,11 @@ pub(crate) trait JoinDyn {
     /// nobody can observe it (the handle was dropped): it is then an
     /// unobserved panic.
     fn reject(&self, payload: Payload) -> Option<Payload>;
+
+    /// The data pointer of the waker stored by whoever awaits this task's
+    /// handle, if any. That waker can only fire once this task finishes,
+    /// which the stall check (§3.5) uses.
+    fn joiner_waker_data(&self) -> Option<*const ()>;
 }
 
 impl<T> JoinDyn for JoinCell<T> {
@@ -102,6 +107,13 @@ impl<T> JoinDyn for JoinCell<T> {
             _ => unreachable!("spool: a task panicked after it finished"),
         }
         None
+    }
+
+    fn joiner_waker_data(&self) -> Option<*const ()> {
+        match &*self.state.borrow() {
+            JoinState::Pending { waker: Some(waker) } => Some(waker.data()),
+            _ => None,
+        }
     }
 }
 

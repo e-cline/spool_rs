@@ -273,7 +273,17 @@ rule for **background work**:
 The loop is **alive** if any of these is true:
 - the tick or microtask queue is non-empty
 - there are active timers (`unref()` is future work)
-- (future) there are I/O registrations or `KeepAlive` guards
+- there are `KeepAlive` guards *(M5)*; a remote wake is queued
+- (future) there are I/O registrations
+
+*(M5)* `KeepAlive` is a `Send + Sync + Clone` guard (`spool::keep_alive()`,
+`Runtime::keep_alive()`). While one exists, an idle loop parks instead of
+exiting, still serving remote wakes, and dropping the last guard unparks it.
+It is how a detached task that waits on another thread keeps `run` alive. The
+thread should wake the task *before* it drops the guard. After the loop sees
+the last guard (or the last outside waker) go, it re-checks the remote queue
+behind an acquire fence, so a wake queued just before that drop is never
+missed.
 
 Detached tasks that are pending on something that isn't ref'd (for example a
 channel that nothing will ever send on) don't keep `run` alive. As in Node,
@@ -305,10 +315,22 @@ what Rust users expect from a `block_on`-style function that can't produce its
 value. If tests or embedders turn out to need it, `Runtime::try_block_on`
 returning `Result<T, Stalled>` can be added later without breaking anything.
 
-Known limitation: stall detection is **best-effort, not complete**. If `main`'s
-waker is held by something that is itself stuck (a waker cycle), the loop
-parks forever instead of panicking. That is the same failure mode as a
-deadlocked mutex.
+*(Hardened in M5.)* The check looks at every task, not just `main`. Each
+header's references are its owner's plus its wakers. A waker that a pending
+task's `JoinHandle` state holds for its awaiter (recognized by the waker's
+data pointer) is **accounted for**: it can only fire after that task finishes,
+which needs that task to be woken first. If no header (main or any task) has
+an unaccounted waker, nothing can ever run again, so it is a stall. That
+catches `main` awaiting a stuck task, and chains of them, which used to park
+forever. Any waker the runtime can't identify counts as outside, so the check
+never reports a stall that isn't one. A `KeepAlive` postpones the check until
+it is dropped.
+
+Known limitation: stall detection is still **best-effort, not complete**. A
+waker stored in user data (an `Rc<RefCell<Option<Waker>>>`, a channel) counts
+as outside, even if whatever holds it is itself stuck, and then the loop parks
+forever instead of panicking. That is the same failure mode as a deadlocked
+mutex.
 
 **`run` vs `block_on`:**
 - `run(main)` returns `main`'s output once `main` is done **and** the loop is
@@ -545,7 +567,7 @@ can't slip through. Runtime dependencies stay at zero. These test-only
 | **Unit tests** | `src/**` `#[cfg(test)]` | Slab generations, timer heap ordering and cancellation, queue drains, waker dedupe, the strong-count logic |
 | **Ordering tests** | `tests/ordering.rs` | Hand-written scenarios with exact expected traces (§8.2) |
 | **Node differential tests** | `tests/node_parity/` | Each scenario has a `.js` twin; the harness runs it with `node` and compares the trace with Spool's |
-| **Randomized differential tests** | `tests/fuzz_ordering.rs` | `proptest` generates random trees of `next_tick`/`queue_microtask`/`set_timeout`/`set_interval`/`spawn`/`yield_now`/`sleep`/cancel operations. The same tree is (a) run in Spool and (b) emitted as JS and run in Node; the traces must match |
+| **Randomized differential tests** | `tests/fuzz_ordering.rs` | `proptest` generates random trees of `next_tick`/`queue_microtask`/`set_timeout`/`set_interval`/`spawn`/`yield_now`/`sleep`/cancel operations. The same tree is (a) run in Spool and (b) emitted as JS and run in Node; the traces must match. *(M5: each program runs in its own Node worker, so one Node process checks hundreds of programs in parallel. Delays are multiples of 20ms; programs where timers of different durations share a deadline are skipped, because Node orders those by its per-duration timer lists. `SPOOL_FUZZ_CASES` and `SPOOL_FUZZ_SEED` widen the search.)* |
 | **Reference-model tests** | `tests/model.rs` | A small, obviously-correct queue simulator in test code, compared against Spool with `proptest`. Runs without Node, so it covers CI machines where Node isn't installed |
 | **Timer tests** | `tests/timers.rs` | `MockClock`-driven checks of deadlines, interval drift, timeouts, and zero durations; no real sleeps |
 | **Cancellation tests** | `tests/cancel.rs` | Every row of the §5 table, plus edge cases (§8.3) |

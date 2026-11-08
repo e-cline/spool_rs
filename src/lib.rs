@@ -22,6 +22,7 @@
 //! | [`next_tick`] | `process.nextTick` |
 //! | [`set_timeout`] / [`TimerHandle::cancel`] | `setTimeout` / `clearTimeout` |
 //! | [`set_interval`] / [`TimerHandle::cancel`] | `setInterval` / `clearInterval` |
+//! | [`keep_alive`] / dropping the [`KeepAlive`] | a ref'd handle / `handle.unref()` |
 //! | [`sleep`]`(d).await` | `await new Promise(r => setTimeout(r, ms))` |
 //! | `handle.await` on a task that panicked | `await` on a rejected promise: re-throws |
 //! | [`JoinHandle::try_join`] | `try { await p } catch (e) { .. }` |
@@ -70,6 +71,7 @@
 
 mod clock;
 mod context;
+mod keep_alive;
 mod park;
 mod queue;
 mod runtime;
@@ -80,6 +82,7 @@ mod waker;
 mod yield_now;
 
 pub use clock::{Clock, Instant, MockClock, SystemClock, now};
+pub use keep_alive::{KeepAlive, keep_alive};
 pub use queue::{next_tick, queue_microtask};
 pub use runtime::{Builder, Runtime, block_on, run};
 pub use task::{AbortHandle, AbortOnDrop, JoinError, JoinHandle, TryJoin, spawn};

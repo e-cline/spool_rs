@@ -133,6 +133,180 @@ fn waker_woken_on_runtime_thread_while_not_running() {
 }
 
 #[test]
+fn a_remote_wake_interrupts_a_timer_wait() {
+    // The loop is parked until a far-off timer; the remote wake must cut the
+    // park short.
+    let start = std::time::Instant::now();
+    let out = spool::block_on(async {
+        let _far = spool::set_timeout(Duration::from_secs(30), || {});
+        let (tx, rx) = oneshot();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            tx.send("early");
+        });
+        rx.await
+    });
+    assert_eq!(out, "early");
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn remote_wakes_queued_while_idle_run_in_wake_order() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let rt = spool::Runtime::new();
+    let log: Rc<RefCell<Vec<usize>>> = Rc::default();
+    let wakers: Arc<Mutex<Vec<Option<Waker>>>> = Arc::new(Mutex::new(vec![None, None, None]));
+    let mut handles = Vec::new();
+    for i in 0..3 {
+        let (log, wakers) = (log.clone(), wakers.clone());
+        let mut polled = false;
+        handles.push(rt.spawn(std::future::poll_fn(move |cx| {
+            if polled {
+                log.borrow_mut().push(i);
+                Poll::Ready(())
+            } else {
+                polled = true;
+                wakers.lock().unwrap()[i] = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })));
+    }
+    rt.block_on(spool::yield_now());
+    // Wake 2, 0, 1 from another thread while the runtime isn't running.
+    let w = wakers.clone();
+    thread::spawn(move || {
+        for i in [2, 0, 1] {
+            w.lock().unwrap()[i].take().unwrap().wake();
+        }
+    })
+    .join()
+    .unwrap();
+    rt.block_on(async {
+        for h in handles {
+            h.await;
+        }
+    });
+    assert_eq!(*log.borrow(), [2, 0, 1]);
+}
+
+#[test]
+fn racing_remote_and_local_wakes_are_deduplicated() {
+    // A task re-registers its waker and yields; threads hammer it with
+    // wakes meanwhile. It must finish, and never be polled more often than
+    // it was woken plus its own yields.
+    const ROUNDS: usize = 2000;
+    let stash: Arc<Mutex<Option<Waker>>> = Arc::default();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut threads = Vec::new();
+    for _ in 0..4 {
+        let (stash, stop, wakes) = (stash.clone(), stop.clone(), wakes.clone());
+        threads.push(thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let w = stash.lock().unwrap().clone();
+                if let Some(w) = w {
+                    w.wake();
+                    wakes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                thread::yield_now();
+            }
+        }));
+    }
+    let polls = spool::block_on(async {
+        let s = stash.clone();
+        spool::spawn(async move {
+            let mut polls = 0;
+            std::future::poll_fn(|cx| {
+                polls += 1;
+                *s.lock().unwrap() = Some(cx.waker().clone());
+                if polls >= ROUNDS {
+                    return Poll::Ready(());
+                }
+                cx.waker().wake_by_ref(); // A local wake, racing the remote ones.
+                Poll::Pending
+            })
+            .await;
+            polls
+        })
+        .await
+    });
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for t in threads {
+        t.join().unwrap();
+    }
+    assert_eq!(polls, ROUNDS, "each poll was preceded by one deduped wake");
+}
+
+#[test]
+fn many_threads_wake_main_repeatedly() {
+    const PER_THREAD: usize = 200;
+    const THREADS: usize = 8;
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let stash: Arc<Mutex<Option<Waker>>> = Arc::default();
+    let mut workers = Vec::new();
+    for _ in 0..THREADS {
+        let (tx, stash) = (tx.clone(), stash.clone());
+        workers.push(thread::spawn(move || {
+            for _ in 0..PER_THREAD {
+                tx.send(()).unwrap();
+                if let Some(w) = stash.lock().unwrap().take() {
+                    w.wake();
+                }
+            }
+        }));
+    }
+    drop(tx);
+    let received = spool::block_on(std::future::poll_fn(|cx| {
+        // Register first, then drain, so that no send is missed.
+        *stash.lock().unwrap() = Some(cx.waker().clone());
+        let mut n = 0;
+        loop {
+            match rx.try_recv() {
+                Ok(()) => n += 1,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    COUNT.with(|c| c.set(c.get() + n));
+                    return Poll::Pending;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    COUNT.with(|c| c.set(c.get() + n));
+                    return Poll::Ready(COUNT.with(std::cell::Cell::get));
+                }
+            }
+        }
+    }));
+    for w in workers {
+        w.join().unwrap();
+    }
+    assert_eq!(received, PER_THREAD * THREADS);
+
+    thread_local! {
+        static COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+}
+
+#[test]
+fn a_keep_alive_dropped_while_parked_on_a_timer() {
+    // The unpark from the guard's drop is a spurious wake for a loop that is
+    // waiting on a timer: it just goes back to waiting.
+    let start = std::time::Instant::now();
+    spool::run(async {
+        let keep = spool::keep_alive();
+        spool::set_timeout(Duration::from_millis(40), || {});
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            drop(keep);
+        });
+    });
+    assert!(start.elapsed() >= Duration::from_millis(40));
+}
+
+#[test]
 fn waker_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>(_: &T) {}
     spool::block_on(std::future::poll_fn(|cx| {

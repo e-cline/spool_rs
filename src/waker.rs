@@ -12,7 +12,7 @@
 //!   right now). The id goes onto a mutex-protected queue, and the runtime's
 //!   thread is unparked. The loop moves remote wakes into the microtask queue.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Wake;
 use std::thread::Thread;
@@ -32,6 +32,8 @@ pub(crate) struct Shared {
     has_remote: AtomicBool,
     /// Cleared when the runtime is dropped; later remote wakes are discarded.
     alive: AtomicBool,
+    /// The number of live `KeepAlive` guards.
+    keep_alive: AtomicUsize,
 }
 
 impl Shared {
@@ -42,7 +44,29 @@ impl Shared {
             remote_queue: Mutex::new(Vec::new()),
             has_remote: AtomicBool::new(false),
             alive: AtomicBool::new(true),
+            keep_alive: AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) fn acquire_keep_alive(&self) {
+        self.keep_alive.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Drops one `KeepAlive`. When the last one goes, the loop is unparked so
+    /// that it re-checks whether it should exit.
+    pub(crate) fn release_keep_alive(&self) {
+        if self.keep_alive.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.thread.unpark();
+        }
+    }
+
+    /// Returns `true` if a remote wake is queued and not yet absorbed.
+    pub(crate) fn has_pending_remote(&self) -> bool {
+        self.has_remote.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_kept_alive(&self) -> bool {
+        self.keep_alive.load(Ordering::Acquire) > 0
     }
 
     fn push_remote(&self, id: TaskId) {
