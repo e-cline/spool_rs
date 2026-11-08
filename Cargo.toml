@@ -12,9 +12,10 @@ categories = ["asynchronous"]
 publish = false
 
 [dependencies]
-futures = "0.3.34"
+# Intentionally empty: Spooly has zero runtime dependencies on native targets.
 
 [dev-dependencies]
+futures = "0.3.34" # For `join!` in examples/intervals.rs.
 proptest = "1"
 static_assertions = "1"
 trybuild = "1"
