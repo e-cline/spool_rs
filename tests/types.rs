@@ -20,6 +20,12 @@ assert_impl_all!(spool::Runtime: Default, std::fmt::Debug);
 #[test]
 #[cfg_attr(miri, ignore = "trybuild runs rustc, which Miri can't do")]
 fn ui() {
+    // The .stderr files pin the stable compiler's wording, which beta and
+    // nightly often change. CI's beta jobs set this to skip the comparison.
+    if std::env::var_os("SPOOL_SKIP_UI").is_some_and(|v| v == "1") {
+        eprintln!("skipping trybuild UI tests: SPOOL_SKIP_UI=1");
+        return;
+    }
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/pass_*.rs");
     t.compile_fail("tests/ui/fail_*.rs");
