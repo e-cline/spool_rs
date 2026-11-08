@@ -3,16 +3,15 @@
 use std::cell::RefCell;
 use std::fmt;
 use std::future::Future;
-use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 
-use crate::clock::{Clock, Instant, SystemClock};
+use crate::clock::{self, Clock, Instant};
 use crate::context;
+use crate::driver::native::{self, Mode};
 use crate::keep_alive::KeepAlive;
-use crate::park;
 use crate::queue::{Callback, Microtask, Queue};
 use crate::slab::Slab;
 use crate::task::{self, BoxFuture, JoinDyn, JoinHandle, MAIN_TASK, TaskId, TaskSlot};
@@ -21,9 +20,44 @@ use crate::waker::{Shared, TaskHeader};
 
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
-const STALL_MESSAGE: &str = "spool: main future stalled: it is pending but nothing can wake it \
-     (no queued work, no timers, no `KeepAlive` guards, and no wakers outside the runtime; \
-     every pending task is stuck too)";
+/// What a driver should do after a [`step`](Inner::step) (D5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// More work may be ready (or main asked the step to stop early): step
+    /// again.
+    Busy,
+    /// Nothing to do until this deadline (the next timer), or a remote wake.
+    WaitUntil(Instant),
+    /// Nothing to do until a remote wake: a `KeepAlive` exists, or a waker
+    /// outside the runtime might still wake a pending main.
+    WaitForWake,
+    /// Nothing can ever happen again. If main is still pending, it stalled.
+    Idle,
+}
+
+/// The main future of a driver, as the step sees it. It isn't in the task
+/// slab (it needn't be `'static`) and uses the reserved id `MAIN_TASK`.
+pub(crate) trait Main {
+    /// Polls main, unless it already completed (a stale wake). Returns
+    /// `true` if the step should stop now: main completed, and its driver
+    /// returns as soon as it does.
+    fn poll(&mut self) -> bool;
+
+    /// Main's header while it is pending, for the stall check; `None` once
+    /// it completed (or if there is no main).
+    fn pending_header(&self) -> Option<&Arc<TaskHeader>>;
+}
+
+/// No main future: a `Poll(MAIN_TASK)` entry is a stale wake.
+impl Main for () {
+    fn poll(&mut self) -> bool {
+        false
+    }
+
+    fn pending_header(&self) -> Option<&Arc<TaskHeader>> {
+        None
+    }
+}
 
 /// The runtime's thread-local state. Never shared across threads.
 pub(crate) struct Inner {
@@ -55,6 +89,19 @@ impl Inner {
 
     pub(crate) fn now(&self) -> Instant {
         self.clock.now()
+    }
+
+    pub(crate) fn clock(&self) -> &dyn Clock {
+        &*self.clock
+    }
+
+    /// A header for a new main future, already scheduled (its first poll
+    /// is due).
+    pub(crate) fn main_header(&self) -> Arc<TaskHeader> {
+        Arc::new(TaskHeader::new_scheduled(
+            MAIN_TASK,
+            Arc::clone(&self.shared),
+        ))
     }
 
     pub(crate) fn timers(&self) -> &RefCell<TimerQueue> {
@@ -172,13 +219,13 @@ impl Inner {
     /// Drains the microtask queue, including microtasks queued meanwhile
     /// (§3.2 of the plan).
     ///
-    /// `poll_main` is called for each `Poll(MAIN_TASK)` entry. If it returns
-    /// `true`, draining stops immediately and this returns `true`.
-    fn drain(&self, poll_main: &mut dyn FnMut() -> bool) -> bool {
+    /// `main` is polled for each `Poll(MAIN_TASK)` entry. If it asks to stop,
+    /// draining stops immediately and this returns `true`.
+    pub(crate) fn drain(&self, main: &mut dyn Main) -> bool {
         while let Some(microtask) = self.microtasks.pop() {
             match microtask {
                 Microtask::Poll(id) if id == MAIN_TASK => {
-                    if poll_main() {
+                    if main.poll() {
                         return true;
                     }
                 }
@@ -204,9 +251,8 @@ impl Inner {
     /// start time and was armed before the phase started, draining the
     /// microtask queue after each one.
     ///
-    /// Returns `(fired_any, stop)`, where `stop` means `poll_main` asked to
-    /// stop.
-    fn run_timers(&self, poll_main: &mut dyn FnMut() -> bool) -> (bool, bool) {
+    /// Returns `(fired_any, stop)`, where `stop` means `main` asked to stop.
+    fn run_timers(&self, main: &mut dyn Main) -> (bool, bool) {
         let now = self.clock.now();
         let cutoff = self.timers.borrow().next_seq();
         let mut fired_any = false;
@@ -232,7 +278,7 @@ impl Inner {
                 }
                 FireAction::Nothing => {}
             }
-            if self.drain(poll_main) {
+            if self.drain(main) {
                 break true;
             }
         };
@@ -240,16 +286,6 @@ impl Inner {
         // they become due again.
         self.timers.borrow_mut().end_phase();
         (fired_any, stop)
-    }
-
-    /// Waits until `deadline`: lets the clock jump there if it can (a
-    /// `MockClock`), else parks the thread (or until a remote wake).
-    fn wait_until(&self, deadline: Instant) {
-        let now = self.clock.now();
-        if deadline <= now || self.clock.advance_when_idle(deadline) {
-            return;
-        }
-        park::park(Some(deadline.saturating_duration_since(now)));
     }
 
     /// Drops every task, microtask, and timer, repeating until nothing
@@ -269,83 +305,50 @@ impl Inner {
         }
     }
 
-    /// The shared driver behind `block_on` and `run`.
-    fn drive<F: Future>(&self, future: F, mode: Mode) -> F::Output {
-        // Every macrotask starts with an empty queue (D4a): flush work left
-        // over from an earlier `block_on` or spawned before this call. (A
-        // leftover `Poll(MAIN_TASK)` is a stale wake from an earlier main
-        // future; it is ignored.)
-        self.drain(&mut || false);
-
-        let mut main = MainTask {
-            future: pin!(future),
-            header: Arc::new(TaskHeader::new_scheduled(
-                MAIN_TASK,
-                Arc::clone(&self.shared),
-            )),
-            output: None,
-        };
-        let stop_when_main_done = mode == Mode::BlockOn;
-
-        // Main's first poll is a macrotask, like a program's top-level code
-        // (D4a). Microtasks it queues run after it.
-        let done = main.poll_if_pending();
-        if done && stop_when_main_done {
-            return main.take_output();
+    /// One step of the event loop (D5): drains the microtask queue, absorbs
+    /// remote wakes, and runs the timers phase. Does a bounded amount of
+    /// work, never blocks, and tells the driver what to wait for.
+    ///
+    /// The caller has entered the runtime (`context::enter`).
+    pub(crate) fn step(&self, main: &mut dyn Main) -> Step {
+        if self.drain(main) {
+            return Step::Busy;
+        }
+        if self.absorb_remote() {
+            return Step::Busy;
+        }
+        let (fired, stop) = self.run_timers(main);
+        if fired || stop {
+            return Step::Busy;
         }
 
-        loop {
-            // Later polls of main are microtasks, like code after an `await`.
-            let stop = self.drain(&mut || main.poll_if_pending() && stop_when_main_done);
-            if stop {
-                return main.take_output();
-            }
-            if self.absorb_remote() {
-                continue;
-            }
-
-            let (fired, stop) =
-                self.run_timers(&mut || main.poll_if_pending() && stop_when_main_done);
-            if stop {
-                return main.take_output();
-            }
-            if fired {
-                continue;
-            }
-
-            // Idle: the queues are empty and no timer is due.
-            let next_deadline = self.timers.borrow_mut().next_deadline();
-            if let Some(deadline) = next_deadline {
-                // Armed timers keep the loop alive.
-                self.wait_until(deadline);
-                continue;
-            }
-            if self.shared.is_kept_alive() {
-                // A `KeepAlive` guard exists: wait for a remote wake, or for
-                // the last guard to be dropped (which unparks us).
-                park::park(None);
-                continue;
-            }
-            // Main is pending, and the loop has nothing to do. Something can
-            // still happen only if a waker exists outside the runtime (it may
-            // be on another thread, so park until a remote wake arrives).
-            let outside = main.output.is_none() && self.has_outside_wakers(&main.header);
-            // A thread wakes (queueing a remote wake) *before* it drops its
-            // waker or its `KeepAlive`. If we just saw that drop, the wake
-            // must not be missed. The fence pairs the relaxed reference-count
-            // reads above with the release of those drops.
-            std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-            if self.shared.has_pending_remote() {
-                continue;
-            }
-            if main.output.is_some() {
-                return main.take_output(); // `run`: the loop is empty.
-            }
-            if outside {
-                park::park(None);
-                continue;
-            }
-            panic!("{STALL_MESSAGE}");
+        // Idle: the queues are empty and no timer is due.
+        if let Some(deadline) = self.timers.borrow_mut().next_deadline() {
+            // Armed timers keep the loop alive.
+            return Step::WaitUntil(deadline);
+        }
+        if self.shared.is_kept_alive() {
+            // Wait for a remote wake, or for the last guard to be dropped
+            // (which unparks the native driver).
+            return Step::WaitForWake;
+        }
+        // Only a pending main can keep the loop alive now, and only if a
+        // waker exists outside the runtime (it may be on another thread).
+        let outside = main
+            .pending_header()
+            .is_some_and(|header| self.has_outside_wakers(header));
+        // A thread wakes (queueing a remote wake) *before* it drops its
+        // waker or its `KeepAlive`. If we just saw that drop, the wake must
+        // not be missed. The fence pairs the relaxed reference-count reads
+        // above with the release of those drops.
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        if self.shared.has_pending_remote() {
+            return Step::Busy;
+        }
+        if outside {
+            Step::WaitForWake
+        } else {
+            Step::Idle
         }
     }
 
@@ -385,45 +388,6 @@ impl Inner {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    /// Return as soon as main completes.
-    BlockOn,
-    /// Return once main has completed and the loop has nothing left to do.
-    Run,
-}
-
-/// The main future of a `block_on` / `run` call. It lives on the caller's
-/// stack, not in the slab, and uses the reserved id `MAIN_TASK`.
-struct MainTask<'a, F: Future> {
-    future: Pin<&'a mut F>,
-    header: Arc<TaskHeader>,
-    output: Option<F::Output>,
-}
-
-impl<F: Future> MainTask<'_, F> {
-    /// Polls main unless it already completed. Returns `true` if this poll
-    /// completed it.
-    fn poll_if_pending(&mut self) -> bool {
-        if self.output.is_some() {
-            return false; // A stale wake after completion.
-        }
-        self.header.clear_scheduled();
-        let waker = Waker::from(Arc::clone(&self.header));
-        match self.future.as_mut().poll(&mut Context::from_waker(&waker)) {
-            Poll::Ready(output) => {
-                self.output = Some(output);
-                true
-            }
-            Poll::Pending => false,
-        }
-    }
-
-    fn take_output(&mut self) -> F::Output {
-        self.output.take().expect("main future completed")
-    }
-}
-
 /// A single-threaded Spool runtime.
 ///
 /// Most programs can use the [`run`](crate::run) or
@@ -444,7 +408,14 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Creates a new runtime on the current thread, with a [`SystemClock`].
+    /// Creates a new runtime on the current thread, with the target's
+    /// default clock: a [`SystemClock`](crate::SystemClock) natively and on
+    /// WASI.
+    ///
+    /// # Panics
+    ///
+    /// On `wasm32-unknown-unknown`, which has no default clock yet: use
+    /// [`Runtime::builder`] and pass a [`Clock`].
     pub fn new() -> Self {
         Self::builder().build()
     }
@@ -545,7 +516,7 @@ impl Runtime {
     /// ```
     pub fn run<F: Future>(&self, future: F) -> F::Output {
         let _enter = context::enter(&self.inner);
-        self.inner.drive(future, Mode::Run)
+        native::drive(&self.inner, future, Mode::Run)
     }
 
     /// Runs `future` to completion on this runtime, driving spawned tasks
@@ -579,7 +550,7 @@ impl Runtime {
     /// ```
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         let _enter = context::enter(&self.inner);
-        self.inner.drive(future, Mode::BlockOn)
+        native::drive(&self.inner, future, Mode::BlockOn)
     }
 
     #[cfg(test)]
@@ -601,16 +572,22 @@ pub struct Builder {
 }
 
 impl Builder {
-    /// Uses `clock` as the runtime's time source. The default is a
-    /// [`SystemClock`]; tests usually want a [`MockClock`](crate::MockClock).
+    /// Uses `clock` as the runtime's time source. The default is the
+    /// target's (see [`Runtime::new`]); tests usually want a
+    /// [`MockClock`](crate::MockClock).
     pub fn clock(mut self, clock: impl Clock + 'static) -> Self {
         self.clock = Some(Rc::new(clock));
         self
     }
 
     /// Builds the runtime.
+    ///
+    /// # Panics
+    ///
+    /// Without a [`clock`](Self::clock), on a target with no default clock
+    /// (see [`Runtime::new`]).
     pub fn build(self) -> Runtime {
-        let clock = self.clock.unwrap_or_else(|| Rc::new(SystemClock::new()));
+        let clock = self.clock.unwrap_or_else(clock::default_clock);
         Runtime {
             inner: Inner::new(clock),
         }
@@ -801,6 +778,78 @@ mod tests {
         }));
         assert_eq!(polls, 1);
         drop(stash);
+    }
+
+    /// Steps `rt` once with no main future, inside the runtime.
+    fn step(rt: &Runtime) -> Step {
+        let _enter = context::enter(&rt.inner);
+        rt.inner.step(&mut ())
+    }
+
+    #[test]
+    fn step_on_an_empty_runtime_is_idle() {
+        assert_eq!(step(&Runtime::new()), Step::Idle);
+    }
+
+    #[test]
+    fn step_drains_microtasks_then_reports_idle() {
+        let rt = Runtime::new();
+        let hits = Rc::new(std::cell::Cell::new(0));
+        let h = hits.clone();
+        drop(rt.spawn(async move { h.set(h.get() + 1) }));
+        assert_eq!(step(&rt), Step::Idle);
+        assert_eq!(hits.get(), 1);
+    }
+
+    #[test]
+    fn step_waits_for_the_next_timer_and_is_busy_once_it_fires() {
+        let clock = crate::MockClock::new();
+        let rt = Runtime::builder().clock(clock.clone()).build();
+        let fired = Rc::new(std::cell::Cell::new(false));
+        let f = fired.clone();
+        let delay = std::time::Duration::from_millis(5);
+        {
+            let _enter = context::enter(&rt.inner);
+            crate::set_timeout(delay, move || f.set(true));
+        }
+        // The step never advances the clock itself: that is the driver's job.
+        assert_eq!(step(&rt), Step::WaitUntil(Instant::ZERO + delay));
+        assert!(!fired.get());
+        clock.advance(delay);
+        assert_eq!(step(&rt), Step::Busy);
+        assert!(fired.get());
+        assert_eq!(step(&rt), Step::Idle);
+    }
+
+    #[test]
+    fn step_waits_for_a_wake_while_kept_alive() {
+        let rt = Runtime::new();
+        let keep = rt.keep_alive();
+        assert_eq!(step(&rt), Step::WaitForWake);
+        drop(keep);
+        assert_eq!(step(&rt), Step::Idle);
+    }
+
+    #[test]
+    fn step_absorbs_a_remote_wake() {
+        let rt = Runtime::new();
+        let stash: Rc<RefCell<Option<Waker>>> = Rc::default();
+        let s = stash.clone();
+        let polls = Rc::new(std::cell::Cell::new(0));
+        let p = polls.clone();
+        drop(rt.spawn(std::future::poll_fn(move |cx| {
+            p.set(p.get() + 1);
+            *s.borrow_mut() = Some(cx.waker().clone());
+            Poll::<()>::Pending
+        })));
+        // No main, so the task's outside waker doesn't keep the loop alive.
+        assert_eq!(step(&rt), Step::Idle);
+        let waker = stash.borrow_mut().take().unwrap();
+        std::thread::spawn(move || waker.wake()).join().unwrap();
+        assert_eq!(step(&rt), Step::Busy);
+        assert_eq!(polls.get(), 1, "absorbed, but not polled yet");
+        assert_eq!(step(&rt), Step::Idle);
+        assert_eq!(polls.get(), 2);
     }
 
     mod rt_helpers {

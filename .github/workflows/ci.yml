@@ -65,6 +65,21 @@ jobs:
       - name: Benchmarks compile
         run: cargo bench --no-run
 
+  wasm:
+    name: check (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [wasm32-unknown-unknown, wasm32-wasip1]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # Only the library builds for now. M9 and M10 add each target's tests.
+      - run: cargo check --target ${{ matrix.target }}
+
   miri:
     runs-on: ubuntu-latest
     steps:

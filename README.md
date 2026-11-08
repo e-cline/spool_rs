@@ -40,8 +40,10 @@ semantics.
 > timers, cancellation, liveness and threads, and polish), M7 (realigning
 > with design v4: no `next_tick`, intervals that don't drift, and a
 > reference model as the test oracle), and M7.5 (design v5: Spool no longer
-> catches panics, so they behave the same natively and on WASM). Next: M8, a
-> non-blocking core so the loop can run in the browser. See
+> catches panics, so they behave the same natively and on WASM), and M8 (a
+> non-blocking core: the loop is a `step()` that a per-target driver calls,
+> and the crate builds for `wasm32-unknown-unknown` and `wasm32-wasip1`).
+> Next: M9, a browser driver. See
 > [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md) §12.
 
 The crate docs (`cargo doc --open`) are the guide: the closest JS

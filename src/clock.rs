@@ -140,8 +140,8 @@ impl Sub<Instant> for Instant {
 
 /// A source of time for a runtime.
 ///
-/// Spool ships with [`SystemClock`] (the default) and [`MockClock`] (for
-/// tests). Pass a clock to [`Builder::clock`](crate::Builder::clock).
+/// Spool ships with [`SystemClock`] (the default natively and on WASI) and
+/// [`MockClock`] (for tests). Pass a clock to [`Builder::clock`](crate::Builder::clock).
 ///
 /// A custom clock only needs [`now`](Clock::now). When the runtime is idle
 /// until a timer, it sleeps for `deadline - now()` of real time, so a custom
@@ -185,7 +185,8 @@ pub trait Clock {
     }
 }
 
-/// The real-time clock, backed by `std::time::Instant`. The default.
+/// The real-time clock, backed by `std::time::Instant`. The default natively
+/// and on WASI ([`Runtime::new`](crate::Runtime::new)).
 ///
 /// ```
 /// use std::time::Duration;
@@ -218,6 +219,23 @@ impl Default for SystemClock {
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
         Instant(self.epoch.elapsed())
+    }
+}
+
+/// The target's default clock (D13), used when the builder has none.
+pub(crate) fn default_clock() -> Rc<dyn Clock> {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        Rc::new(SystemClock::new())
+    }
+    // `std::time::Instant::now()` panics here, so fail early with a clearer
+    // message. The `browser` feature (M9) adds a `performance.now()` clock.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        panic!(
+            "spool: wasm32-unknown-unknown has no default clock; \
+             pass one with `Runtime::builder().clock(...)`"
+        )
     }
 }
 

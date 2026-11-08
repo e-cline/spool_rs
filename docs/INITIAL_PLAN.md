@@ -6,7 +6,8 @@
 > and it targets native and WASM equally. v5 replaces the panic model with
 > one that behaves the same on every target: Spool doesn't catch panics
 > (§6). §11.2 and §11.3 list what v4 and v5 changed, and §12 has the
-> milestones (M8 onward is the WASM work). Decisions are tagged `D#`; a
+> milestones (M8 onward is the WASM work; M8, the non-blocking core, is
+> done). Decisions are tagged `D#`; a
 > decision marked *(revised in v4)*, *(new in v4)* or *(revised in v5)*
 > says what is built so far.
 
@@ -253,9 +254,20 @@ schedules one). It never blocks and never panics on a stall.
 ```
 
 To make this possible, the main future becomes a task the driver can resume,
-instead of a value pinned on `drive()`'s stack (M8). *(As built in v1, the
-step and the native park loop are one function, `drive()`, which blocks the
-thread. That works natively but not in the browser.)*
+instead of a value pinned on `drive()`'s stack (M8).
+
+*As built (M8):* `Inner::step(&mut dyn Main) -> Step` is the step, and
+`driver::native::drive` is the native driver. Main isn't in the task slab,
+because `block_on` accepts futures that aren't `'static`. Instead, a driver
+holds it in a `MainTask` (generic over `Pin<&mut F>` or `Pin<Box<F>>`) and
+passes it to each step, which polls it for `Poll(MAIN_TASK)` entries and
+reads its header for the stall check. Main's first poll (a macrotask, D4a)
+and the stall panic belong to the native driver, not the step. `Idle` means
+nothing can ever run again; with main still pending, that is a stall. A step
+returns `Busy` as soon as main completes if its driver asked to stop then
+(`block_on`), so the driver returns without finishing the drain. *(In v1 the
+step and the native park loop were one function, `drive()`, which blocked
+the thread.)*
 
 ### 3.4 Timers
 
@@ -397,8 +409,9 @@ spool/
 │   │   ├── interval.rs # Interval
 │   │   └── timeout.rs  # Timeout, Elapsed
 │   ├── clock.rs        # Instant, Clock trait, SystemClock, MockClock
-│   └── driver/         # (M8) the per-target drivers of §7
-│       ├── native.rs   # run / block_on: thread park, remote wakes
+│   ├── driver.rs       # MainTask, shared by the drivers of §7
+│   └── driver/
+│       ├── native.rs   # (M8) run / block_on: thread park, remote wakes
 │       ├── browser.rs  # (M9, feature "browser") host callbacks, JS timers
 │       └── wasi.rs     # (M10, if native.rs doesn't already work there)
 ├── tests/              # see §8
@@ -618,8 +631,10 @@ Runtime::builder().clock(MockClock::new()).build()
 
 - **D13. Default clock per target** *(new in v4)*. `Runtime::new()` picks
   the target's default clock with `cfg`, so the default runtime never panics
-  on a supported target. *(As built in v1, it always uses `SystemClock`,
-  which panics in the browser.)*
+  on a supported target. *(As built in M8: `SystemClock` natively and on
+  WASI. `wasm32-unknown-unknown` has no default until M9's
+  `PerformanceClock`, so `Runtime::new()` panics there with a message
+  asking for `Builder::clock`, rather than failing inside `std`.)*
 - **D14. Browser microtasks** *(new in v4)*. The browser driver runs a
   whole Spool step inside one host callback (a JS microtask for `Busy`, a JS
   timeout for `WaitUntil`). Spool's microtasks are therefore ordered among
@@ -786,10 +801,11 @@ that the hot paths are the ones every target shares.
   `publish = false` in `Cargo.toml`. If we do publish and `spool` is taken,
   only the package name changes (for example `spool-rt`); the library can stay
   `spool` through `[lib] name`.
-- **Public `step()` (decide in M8).** The step function could stay internal
-  to the drivers, or be public so embedders (a game loop, a GUI event loop)
-  can drive Spool themselves. Public is more useful but commits to the
-  `Step` type.
+- **Public `step()` (decided in M8: internal for now).** The step function
+  could be public so embedders (a game loop, a GUI event loop) can drive
+  Spool themselves, but that commits to the `Step` type and its semantics.
+  It stays `pub(crate)` until the browser driver (M9) has tried that shape
+  and someone needs it; making it public later doesn't break anything.
 - **Browser bindings (decide in M9).** `wasm-bindgen` + `js-sys` is the
   standard choice. Hand-written imports would avoid the dependency but cost
   more to maintain.
@@ -859,7 +875,7 @@ that the hot paths are the ones every target shares.
 | M6 | Polish | done | Rustdoc guide, examples, stress tests, benchmarks (§9.6 baseline), coverage gate |
 | M7 | Realign with v4 | done | Remove `next_tick` and the tick queue (D12), from the API, the model, tests, docs, and examples. New interval semantics (D7) for `set_interval` and `interval()`, with model and timer tests for skipped ticks. Extend the reference model with intervals and timer cancellation (D15), then remove the Node fuzzer; trim `node_parity` to the optional comparison and drop `SPOOL_REQUIRE_NODE` and the Node install from CI. Reword the crate docs, README, and examples from "matches Node" to "inspired by JS". Update the "§8.2 scenario N" references in the tests to the v4 numbering. |
 | M7.5 | Simpler panics (v5) | done | Remove `catch_unwind`, the panicked join state, unobserved-panic re-raising, and poisoning (D11). `JoinError` becomes an opaque "aborted" struct. Rewrite the panic tests, the model's panic handling, the docs, and the `panics` example for the new model. |
-| M8 | Non-blocking core | | Split `drive()` into `step()` (D5) and a native driver; make main a resumable task; per-target default clock (D13); `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1` in CI. Settle the public-`step()` question (§10). No behavior change on native: the full suite must pass unchanged. |
+| M8 | Non-blocking core | done | Split `drive()` into `step()` (D5) and a native driver; make main a resumable task; per-target default clock (D13); `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1` in CI. Settle the public-`step()` question (§10). No behavior change on native: the full suite must pass unchanged. |
 | M9 | Browser | | Feature `browser`: `PerformanceClock`, the host-callback driver (D14), `browser::start`, an example page, and the suite (minus threads and panics) under `wasm-bindgen-test` in a headless browser in CI. |
 | M10 | WASI | | Make the suite (minus threads) pass under wasmtime on `wasm32-wasip1` (and `-wasip2` if it is no extra work), adding a WASI driver only if the native one doesn't work there; add it to CI. |
 | M11 | Performance | | §9.6, measured against `BENCHMARKS.md`. |

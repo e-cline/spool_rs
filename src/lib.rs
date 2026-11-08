@@ -180,6 +180,7 @@
 
 mod clock;
 mod context;
+mod driver;
 mod keep_alive;
 mod park;
 mod queue;
