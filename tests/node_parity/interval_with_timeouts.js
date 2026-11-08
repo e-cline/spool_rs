@@ -5,8 +5,8 @@ async function main() {
     n += 1;
     console.log(`i${n}`);
     if (n === 3) clearInterval(h);
-  }, 20);
-  setTimeout(() => console.log("t30"), 30);
-  setTimeout(() => console.log("t50"), 50);
+  }, 100);
+  setTimeout(() => console.log("t150"), 150);
+  setTimeout(() => console.log("t260"), 260);
 }
 main();

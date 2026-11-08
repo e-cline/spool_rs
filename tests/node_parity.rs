@@ -527,26 +527,31 @@ fn timer_deadline_order() {
 }
 
 /// Plan §8.2 scenario 7.
+///
+/// Node schedules each interval tick from when the previous one actually ran,
+/// so late timers (up to ~16ms each on Windows) push later ticks back. The
+/// deadlines are spread out so that the order survives several late timers:
+/// `i2` lands in 200..~232ms, between `t150` and `t260`.
 #[test]
 #[cfg_attr(miri, ignore = "spawns a process")]
 fn interval_with_timeouts() {
     let trace = run_spool(async |t| {
         let ti = t.clone();
         let mut n = 0;
-        spool::set_interval(20 * MS, move |h| {
+        spool::set_interval(100 * MS, move |h| {
             n += 1;
             ti.log(format!("i{n}"));
             if n == 3 {
                 h.cancel();
             }
         });
-        timeout(&t, 30, |t| t.log("t30"));
-        timeout(&t, 50, |t| t.log("t50"));
+        timeout(&t, 150, |t| t.log("t150"));
+        timeout(&t, 260, |t| t.log("t260"));
     });
     check(
         "interval_with_timeouts.js",
         trace,
-        &["i1", "t30", "i2", "t50", "i3"],
+        &["i1", "t150", "i2", "t260", "i3"],
     );
 }
 

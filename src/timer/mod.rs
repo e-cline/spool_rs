@@ -326,9 +326,12 @@ impl fmt::Debug for TimerHandle {
 /// ```
 /// use std::{cell::RefCell, rc::Rc, time::Duration};
 ///
+/// // A MockClock keeps the example deterministic: on the real clock, time
+/// // passes between the calls below, which matters on a very slow machine.
+/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
 /// let log = Rc::new(RefCell::new(Vec::new()));
 /// let l = log.clone();
-/// spool::run(async move {
+/// rt.run(async move {
 ///     let (a, b) = (l.clone(), l.clone());
 ///     spool::set_timeout(Duration::from_millis(20), move || a.borrow_mut().push("20ms"));
 ///     spool::set_timeout(Duration::from_millis(10), move || b.borrow_mut().push("10ms"));
