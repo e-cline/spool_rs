@@ -4,6 +4,9 @@
 // `spawn(async move { h.await })` deliberately makes a separate awaiting task.
 #![allow(clippy::redundant_async_block)]
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 mod common;
 
 use std::cell::Cell;
@@ -24,6 +27,7 @@ fn mock() -> (spooly::Runtime, spooly::MockClock) {
 // ── KeepAlive ───────────────────────────────────────────────────────────────
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn keep_alive_lets_a_detached_task_finish_its_remote_wait() {
     let got = Rc::new(Cell::new(0));
     let g = got.clone();
@@ -58,6 +62,7 @@ fn without_keep_alive_run_drops_the_waiting_task() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn run_returns_once_the_last_guard_is_dropped() {
     let start = Instant::now();
     spooly::run(async {
@@ -71,6 +76,7 @@ fn run_returns_once_the_last_guard_is_dropped() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn every_clone_must_be_dropped() {
     let start = Instant::now();
     spooly::run(async {
@@ -101,6 +107,7 @@ fn a_guard_dropped_on_the_loop_thread_releases_the_loop() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn a_guard_made_before_running() {
     let rt = spooly::Runtime::new();
     let keep = rt.keep_alive();
@@ -147,6 +154,7 @@ fn keep_alive_together_with_timers() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn a_remote_wake_while_kept_alive_is_handled() {
     // The loop parks for the guard, but still serves remote wakes.
     let trace = Trace::new();
@@ -173,12 +181,17 @@ fn a_remote_wake_while_kept_alive_is_handled() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn keep_alive_outside_a_runtime_panics() {
     let msg = expect_panic(|| drop(spooly::keep_alive()));
     assert!(msg.contains("`keep_alive` called outside"), "{msg}");
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn a_guard_can_outlive_its_runtime() {
     let rt = spooly::Runtime::new();
     let keep = rt.keep_alive();
@@ -196,6 +209,7 @@ fn keep_alive_debug_output() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn a_stalled_main_waits_for_the_guard_then_panics() {
     // While a guard exists, the loop can't know nothing will happen; once
     // it is gone, the stall is reported.
@@ -217,6 +231,10 @@ fn a_stalled_main_waits_for_the_guard_then_panics() {
 // ── Stall detection: stalls that are now detected ───────────────────────────
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn main_awaiting_a_stuck_task_is_a_stall() {
     // The stuck task holds main's waker (in its JoinHandle state), but can
     // never be woken itself.
@@ -227,6 +245,10 @@ fn main_awaiting_a_stuck_task_is_a_stall() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn a_chain_of_stuck_tasks_is_a_stall() {
     let msg = expect_panic(|| {
         spooly::block_on(async {
@@ -240,6 +262,10 @@ fn a_chain_of_stuck_tasks_is_a_stall() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn every_join_flavor_is_seen_through() {
     let msg = expect_panic(|| {
         spooly::block_on(async { spooly::spawn(never()).try_join().await.is_ok() })
@@ -251,6 +277,10 @@ fn every_join_flavor_is_seen_through() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn a_task_stuck_after_a_timer_is_a_stall_once_the_timer_is_gone() {
     let (rt, clock) = mock();
     let msg = expect_panic(|| {
@@ -267,6 +297,10 @@ fn a_task_stuck_after_a_timer_is_a_stall_once_the_timer_is_gone() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn stuck_detached_tasks_dont_hide_a_stall() {
     let msg = expect_panic(|| {
         spooly::block_on(async {
@@ -280,6 +314,10 @@ fn stuck_detached_tasks_dont_hide_a_stall() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn the_stalled_runtime_drops_its_stuck_tasks() {
     let counter = DropCounter::new();
     let c = counter.clone();
@@ -299,6 +337,7 @@ fn the_stalled_runtime_drops_its_stuck_tasks() {
 // ── Stall detection: things that look stuck but aren't ──────────────────────
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn main_awaiting_a_task_that_waits_on_a_thread() {
     let out = spooly::block_on(async {
         let (tx, rx) = oneshot::<u32>();
@@ -312,6 +351,7 @@ fn main_awaiting_a_task_that_waits_on_a_thread() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn main_awaiting_a_chain_that_ends_on_a_thread() {
     let out = spooly::block_on(async {
         let (tx, rx) = oneshot::<u32>();
@@ -327,6 +367,7 @@ fn main_awaiting_a_chain_that_ends_on_a_thread() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn a_detached_task_on_a_thread_can_unstick_the_awaited_task() {
     // Main awaits T, which waits on a gate. Nothing about T or main is
     // remote, but a detached task D (waiting on a thread) opens the gate.
@@ -352,6 +393,7 @@ fn a_detached_task_on_a_thread_can_unstick_the_awaited_task() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn a_task_waking_main_from_a_thread() {
     // Main's own waker is sent to another thread (not through a JoinHandle).
     let out = spooly::block_on(async {

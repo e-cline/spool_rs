@@ -1,8 +1,8 @@
 # spooly
 
 **Spooly** is a lightweight, single-threaded Rust async executor, with a
-scheduling model inspired by the JavaScript event loop. It targets native
-platforms and WASM (browser and WASI support are in progress).
+scheduling model inspired by the JavaScript event loop. It runs on native
+platforms and in the browser; WASI support is in progress.
 
 WARNING: This is an experiment. Nothing here is not intended for production use.
 
@@ -12,7 +12,8 @@ WARNING: This is an experiment. Nothing here is not intended for production use.
   time, and the microtask queue drains after each.
 - Panics behave the same everywhere: Spooly never catches them, so a panic
   stops the loop. Errors a caller should handle are `Result` values.
-- Zero runtime dependencies, no `unsafe`.
+- Zero runtime dependencies on native targets (the optional `browser`
+  feature adds `wasm-bindgen`), and no `unsafe`.
 
 ```rust
 use std::time::Duration;
@@ -42,8 +43,8 @@ semantics.
 > reference model as the test oracle), and M7.5 (design v5: Spooly no longer
 > catches panics, so they behave the same natively and on WASM), and M8 (a
 > non-blocking core: the loop is a `step()` that a per-target driver calls,
-> and the crate builds for `wasm32-unknown-unknown` and `wasm32-wasip1`).
-> Next: M9, a browser driver. See
+> and the crate builds for `wasm32-unknown-unknown` and `wasm32-wasip1`),
+> and M9 (the browser driver). Next: M10, WASI. See
 > [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md) §12.
 
 The crate docs (`cargo doc --open`) are the guide: the closest JS
@@ -59,6 +60,31 @@ cargo run --example intervals      # intervals on a fixed schedule, shared state
 cargo run --example cancellation   # timeouts, abort, abort_on_drop, cancelling timers
 cargo run --example panics         # errors as `Result`s, try_join on abort, a panic stopping the loop
 cargo run --example threads        # waking `!Send` tasks from worker threads, KeepAlive
+```
+
+## In the browser
+
+On `wasm32-unknown-unknown`, enable the `browser` feature and start the loop
+with `browser::start`, which returns at once. Each step of the event loop then
+runs from a JS callback, with the same ordering as on native:
+
+```rust
+spooly::browser::start(async {
+    spooly::sleep(std::time::Duration::from_millis(500)).await;
+    // ... update the page ...
+});
+```
+
+[`examples/browser`](examples/browser) is a small page: a clock on an
+interval, the event loop's ordering, and a task woken by button clicks.
+Build it with the `wasm-bindgen` CLI (the same version as the crate in
+`Cargo.lock`) and serve the folder:
+
+```sh
+cargo build --release --example browser --target wasm32-unknown-unknown --features browser
+wasm-bindgen --target web --out-dir examples/browser/pkg \
+    target/wasm32-unknown-unknown/release/examples/browser.wasm
+python3 -m http.server -d examples/browser   # then open http://localhost:8000
 ```
 
 ## Development
@@ -80,6 +106,15 @@ optional sanity check that Spooly still behaves like a JS event loop. It needs
 
 ```sh
 SPOOLY_COMPARE_NODE=1 cargo test --test node_parity
+```
+
+The suite also runs in a headless browser, except for the tests that need
+threads or catch panics (WASM aborts on a panic), plus `tests/browser.rs`
+for the browser driver. It needs [`wasm-pack`](https://github.com/drager/wasm-pack)
+and Chrome or Firefox:
+
+```sh
+WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --headless --firefox -- --features browser
 ```
 
 Stress tests (a million tasks, 100k timers with random cancellation, very

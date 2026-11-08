@@ -9,6 +9,9 @@
 //! cargo test --release --test stress -- --ignored
 //! ```
 
+// Native only: needs threads, and long runs.
+#![cfg(not(target_arch = "wasm32"))]
+
 mod common;
 
 use std::cell::{Cell, RefCell};

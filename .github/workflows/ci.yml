@@ -59,9 +59,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
       - run: cargo fmt --check
       - run: cargo clippy --all-targets
       - run: cargo doc --no-deps
+      - name: Clippy and docs for the browser (includes the browser example)
+        run: |
+          cargo clippy --all-targets --target wasm32-unknown-unknown --features browser
+          cargo doc --no-deps --target wasm32-unknown-unknown --features browser
       - name: Benchmarks compile
         run: cargo bench --no-run
 
@@ -77,8 +82,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # Only the library builds for now. M9 and M10 add each target's tests.
+      # Without features. The browser job tests `wasm32-unknown-unknown`
+      # with `browser`; M10 adds the WASI tests.
       - run: cargo check --target ${{ matrix.target }}
+
+  browser:
+    name: browser (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The runner's preinstalled drivers match its browsers.
+          - browser: chrome
+            driver: --chromedriver $CHROMEWEBDRIVER/chromedriver
+          - browser: firefox
+            driver: --geckodriver $GECKOWEBDRIVER/geckodriver
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@wasm-pack
+      - name: Test suite in a headless browser
+        run: wasm-pack test --headless --${{ matrix.browser }} ${{ matrix.driver }} -- --features browser
+        env:
+          # Run every test in the browser, not in Node.
+          WASM_BINDGEN_USE_BROWSER: "1"
 
   miri:
     runs-on: ubuntu-latest

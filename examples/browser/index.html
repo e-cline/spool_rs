@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spooly in the browser</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+    code, #clock { font-family: ui-monospace, monospace; }
+  </style>
+</head>
+<body>
+  <h1>Spooly in the browser</h1>
+  <p>Running for <span id="clock">0s</span>, on <code>spooly::interval</code>.</p>
+
+  <h2>Ordering</h2>
+  <ol id="order" style="list-style: none; padding: 0"></ol>
+
+  <h2>Wakes from JS</h2>
+  <p><button id="button">Click me</button> Clicks: <span id="clicks">0</span></p>
+
+  <script type="module">
+    // Built by `wasm-bindgen --target web` (see examples/browser/main.rs).
+    import init from "./pkg/browser.js";
+    init();
+  </script>
+</body>
+</html>

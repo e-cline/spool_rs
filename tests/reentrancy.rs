@@ -1,6 +1,9 @@
 //! User code calling back into the runtime from polls and `Drop` impls.
 //! None of these may hit a `RefCell` `BorrowMutError`.
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 mod common;
 
 use std::cell::RefCell;

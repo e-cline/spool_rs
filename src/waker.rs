@@ -79,6 +79,9 @@ impl Shared {
             .push(id);
         self.has_remote.store(true, Ordering::Release);
         self.thread.unpark();
+        // In the browser nothing is parked: queue a step instead.
+        #[cfg(all(feature = "browser", target_arch = "wasm32"))]
+        crate::driver::browser::wake(self.runtime_id);
     }
 
     /// Takes every remotely woken id, in wake order.

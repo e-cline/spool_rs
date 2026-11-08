@@ -410,12 +410,13 @@ pub struct Runtime {
 impl Runtime {
     /// Creates a new runtime on the current thread, with the target's
     /// default clock: a [`SystemClock`](crate::SystemClock) natively and on
-    /// WASI.
+    /// WASI, and a `PerformanceClock` in the browser (`wasm32-unknown-unknown`
+    /// with the `browser` feature).
     ///
     /// # Panics
     ///
-    /// On `wasm32-unknown-unknown`, which has no default clock yet: use
-    /// [`Runtime::builder`] and pass a [`Clock`].
+    /// On `wasm32-unknown-unknown` without the `browser` feature, which has
+    /// no default clock: use [`Runtime::builder`] and pass a [`Clock`].
     pub fn new() -> Self {
         Self::builder().build()
     }
@@ -551,6 +552,11 @@ impl Runtime {
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         let _enter = context::enter(&self.inner);
         native::drive(&self.inner, future, Mode::BlockOn)
+    }
+
+    #[cfg(all(feature = "browser", target_arch = "wasm32"))]
+    pub(crate) fn inner(&self) -> &Rc<Inner> {
+        &self.inner
     }
 
     #[cfg(test)]

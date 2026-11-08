@@ -23,5 +23,8 @@ rustc-ice-*.txt
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# wasm-bindgen output for the browser example
+examples/browser/pkg/
+
 # Claude Code worktrees
 .claude/worktrees/

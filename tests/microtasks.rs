@@ -1,5 +1,8 @@
 //! `queue_microtask`: API behavior and edge cases.
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 mod common;
 
 use std::cell::Cell;
@@ -9,6 +12,10 @@ use std::time::Duration;
 use common::{DropCounter, OnDrop, Trace, expect_panic};
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn queue_microtask_outside_a_runtime_panics() {
     let msg = expect_panic(|| spooly::queue_microtask(|| {}));
     assert!(msg.contains("`queue_microtask` called outside"), "{msg}");
@@ -78,6 +85,10 @@ fn long_microtask_chain_does_not_grow_the_stack() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn callback_panic_unwinds_out_of_run() {
     let msg = expect_panic(|| spooly::run(async { spooly::queue_microtask(|| panic!("cb boom")) }));
     assert_eq!(msg, "cb boom");

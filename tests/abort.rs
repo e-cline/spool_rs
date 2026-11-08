@@ -3,6 +3,9 @@
 // `spawn(async move { h.await })` deliberately makes a separate awaiting task.
 #![allow(clippy::redundant_async_block)]
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 mod common;
 
 use std::cell::{Cell, RefCell};
@@ -53,6 +56,10 @@ fn abort_before_the_first_poll_means_it_never_runs() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn awaiting_an_aborted_handle_panics() {
     let msg = expect_panic(|| {
         spooly::block_on(async {
@@ -65,6 +72,10 @@ fn awaiting_an_aborted_handle_panics() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn the_aborted_panic_in_an_awaiting_task_unwinds_out() {
     let msg = expect_panic(|| {
         spooly::block_on(async {
@@ -142,6 +153,7 @@ fn stale_wakes_after_abort_are_ignored() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn a_remote_wake_after_abort_is_ignored() {
     let (tx, rx) = common::oneshot::<u32>();
     let rt = spooly::Runtime::new();

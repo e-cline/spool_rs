@@ -1,5 +1,8 @@
 //! `run`: Node-like "until the loop is empty" semantics (plan §3.5).
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 mod common;
 
 use std::cell::Cell;
@@ -82,6 +85,7 @@ fn pending_detached_tasks_do_not_keep_the_loop_alive() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn remote_waits_of_detached_tasks_do_not_keep_the_loop_alive() {
     // Documented v1 behavior: only main's outstanding wakers keep the loop
     // waiting. (`KeepAlive` guards are future work.)
@@ -103,6 +107,7 @@ fn remote_waits_of_detached_tasks_do_not_keep_the_loop_alive() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn main_waiting_on_another_thread_keeps_the_loop_alive() {
     let (tx, rx) = oneshot();
     let worker = thread::spawn(move || {
@@ -114,12 +119,20 @@ fn main_waiting_on_another_thread_keeps_the_loop_alive() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn stalled_main_panics() {
     let msg = expect_panic(|| spooly::run(never()));
     assert!(msg.contains("main future stalled"), "{msg}");
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn nested_run_panics() {
     let msg = expect_panic(|| spooly::run(async { spooly::run(async {}) }));
     assert!(msg.contains("nested `block_on`"), "{msg}");

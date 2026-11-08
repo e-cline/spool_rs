@@ -6,8 +6,8 @@
 > and it targets native and WASM equally. v5 replaces the panic model with
 > one that behaves the same on every target: Spooly doesn't catch panics
 > (§6). §11.2 and §11.3 list what v4 and v5 changed, and §12 has the
-> milestones (M8 onward is the WASM work; M8, the non-blocking core, is
-> done). Decisions are tagged `D#`; a
+> milestones (M8 onward is the WASM work; M8, the non-blocking core, and
+> M9, the browser driver, are done). Decisions are tagged `D#`; a
 > decision marked *(revised in v4)*, *(new in v4)* or *(revised in v5)*
 > says what is built so far.
 
@@ -398,6 +398,7 @@ spooly/
 ├── Cargo.toml          # edition 2024; no dependencies on native targets
 ├── src/
 │   ├── lib.rs          # public re-exports + free functions
+│   ├── browser.rs      # (M9, feature "browser") start, start_on, PerformanceClock
 │   ├── runtime.rs      # Runtime, builder, step() (§3.3)
 │   ├── context.rs      # thread-local CURRENT runtime (enter/exit guard)
 │   ├── task.rs         # task slab, spawn, JoinHandle, AbortHandle, JoinError
@@ -631,16 +632,33 @@ Runtime::builder().clock(MockClock::new()).build()
 
 - **D13. Default clock per target** *(new in v4)*. `Runtime::new()` picks
   the target's default clock with `cfg`, so the default runtime never panics
-  on a supported target. *(As built in M8: `SystemClock` natively and on
-  WASI. `wasm32-unknown-unknown` has no default until M9's
-  `PerformanceClock`, so `Runtime::new()` panics there with a message
-  asking for `Builder::clock`, rather than failing inside `std`.)*
+  on a supported target. *(As built in M8–M9: `SystemClock` natively and
+  on WASI, and `PerformanceClock` on `wasm32-unknown-unknown` with the
+  `browser` feature. Without the feature that target has no way to read the
+  time, so `Runtime::new()` panics there, asking for the feature or
+  `Builder::clock`, rather than failing inside `std`.)*
 - **D14. Browser microtasks** *(new in v4)*. The browser driver runs a
   whole Spooly step inside one host callback (a JS microtask for `Busy`, a JS
   timeout for `WaitUntil`). Spooly's microtasks are therefore ordered among
   themselves exactly as on native, but not interleaved one-by-one with JS
   promise jobs. That keeps the semantics identical across targets. A
   `JsFuture` awaited in a task works like any other future.
+
+  *As built (M9):* `browser::start(main)` / `start_on(runtime, main)` return
+  at once. The first callback is a JS microtask, so nothing runs inside
+  `start`; it flushes queued work and polls main once (a macrotask, D4a),
+  then steps. `Busy` queues the next step as a JS microtask (at most one
+  queued at a time). `WaitUntil` sets a `setTimeout` for the deadline,
+  unless one is already set for an earlier deadline (a stale, later timeout
+  just runs an empty step), or queues a step at once if the clock can jump
+  there (`MockClock`). `WaitForWake` and `Idle` schedule nothing. A wake from
+  outside a step (a JS callback or promise) takes the remote path (§4.3),
+  which now also queues a step for that runtime. A started runtime lives
+  for the rest of the page in a thread-local registry: it never exits,
+  never tears down, and never panics on a stall, and pending tasks stay
+  alive after main completes. `run` / `block_on` still work in the browser,
+  but only for code that never has to wait for real time or a wake: the
+  native driver's timed park returns at once there, so it busy-waits.
 - On every target, `cargo check` must pass in CI from M8, so a regression in
   portability is caught before the target's own driver lands.
 
@@ -681,6 +699,7 @@ that coverage into the model, and removed the Node fuzzer.)*
 | **Doc tests** | rustdoc | Every public item has a runnable example |
 | **Node comparison** (optional) | `tests/node_parity.rs` | A handful of scenarios also run as JS in Node, as a sanity check that Spooly's model is still recognizably JS-like. Opt-in with `SPOOLY_COMPARE_NODE=1`; otherwise (and in CI) only the Spooly half runs. A scenario where Spooly deliberately differs (intervals, D7) is not compared. |
 | **WASM** (M8–M10) | CI | `cargo check` on WASM targets; the suite under `wasm-bindgen-test` (browser) and wasmtime (WASI) |
+| **Browser driver** (M9) | `tests/browser.rs` | `browser::start` in a real browser: steps from JS callbacks, real timers via `setTimeout`, wakes from outside a step, `MockClock` jumps, several runtimes, and the runtime outliving main. The shared files run in the browser too, with tests that need threads or catch panics marked `ignore` there; `model`, `stress`, `node_parity` and `panics` are native-only. |
 
 ### 8.2 Core ordering scenarios
 
@@ -728,6 +747,10 @@ that coverage into the model, and removed the Node fuzzer.)*
 - Coverage with `cargo-llvm-cov`: CI requires ≥ 90% of lines.
 - Miri runs on the full suite. It becomes essential once `unsafe` lands (§9.6).
 - From M8: `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1`.
+- From M9: the suite with `--features browser` under `wasm-pack test
+  --headless`, in Chrome and Firefox (with the runner's preinstalled
+  drivers, which match its browsers), and clippy and docs for that target,
+  which also build the browser example.
 
 ---
 
@@ -806,9 +829,11 @@ that the hot paths are the ones every target shares.
   Spooly themselves, but that commits to the `Step` type and its semantics.
   It stays `pub(crate)` until the browser driver (M9) has tried that shape
   and someone needs it; making it public later doesn't break anything.
-- **Browser bindings (decide in M9).** `wasm-bindgen` + `js-sys` is the
-  standard choice. Hand-written imports would avoid the dependency but cost
-  more to maintain.
+- **Browser bindings (decided in M9: `wasm-bindgen` only).** The driver
+  needs just `performance.now`, `queueMicrotask` and `setTimeout`, declared
+  with `#[wasm_bindgen] extern` blocks, so `js-sys` isn't needed. It is an
+  optional, wasm-only dependency behind the `browser` feature, and needs no
+  `unsafe` in Spooly's code.
 - **WASI driver (decide in M10).** Whether the native driver works unchanged
   on `wasm32-wasip1`, or WASI needs its own sleep-based driver because
   `std::thread::park` isn't supported there.
@@ -876,6 +901,6 @@ that the hot paths are the ones every target shares.
 | M7 | Realign with v4 | done | Remove `next_tick` and the tick queue (D12), from the API, the model, tests, docs, and examples. New interval semantics (D7) for `set_interval` and `interval()`, with model and timer tests for skipped ticks. Extend the reference model with intervals and timer cancellation (D15), then remove the Node fuzzer; trim `node_parity` to the optional comparison and drop `SPOOLY_REQUIRE_NODE` and the Node install from CI. Reword the crate docs, README, and examples from "matches Node" to "inspired by JS". Update the "§8.2 scenario N" references in the tests to the v4 numbering. |
 | M7.5 | Simpler panics (v5) | done | Remove `catch_unwind`, the panicked join state, unobserved-panic re-raising, and poisoning (D11). `JoinError` becomes an opaque "aborted" struct. Rewrite the panic tests, the model's panic handling, the docs, and the `panics` example for the new model. |
 | M8 | Non-blocking core | done | Split `drive()` into `step()` (D5) and a native driver; make main a resumable task; per-target default clock (D13); `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1` in CI. Settle the public-`step()` question (§10). No behavior change on native: the full suite must pass unchanged. |
-| M9 | Browser | | Feature `browser`: `PerformanceClock`, the host-callback driver (D14), `browser::start`, an example page, and the suite (minus threads and panics) under `wasm-bindgen-test` in a headless browser in CI. |
+| M9 | Browser | done | Feature `browser`: `PerformanceClock`, the host-callback driver (D14), `browser::start`, an example page, and the suite (minus threads and panics) under `wasm-bindgen-test` in a headless browser in CI. |
 | M10 | WASI | | Make the suite (minus threads) pass under wasmtime on `wasm32-wasip1` (and `-wasip2` if it is no extra work), adding a WASI driver only if the native one doesn't work there; add it to CI. |
 | M11 | Performance | | §9.6, measured against `BENCHMARKS.md`. |

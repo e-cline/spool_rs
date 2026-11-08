@@ -4,6 +4,9 @@
 //!
 //! These tests need `panic = "unwind"`, so they are native-only.
 
+// Native only: needs catching panics, but WASM aborts on a panic.
+#![cfg(not(target_arch = "wasm32"))]
+
 mod common;
 
 use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};

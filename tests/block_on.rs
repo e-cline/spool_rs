@@ -1,5 +1,8 @@
 //! Entry points: `block_on`, `Runtime`, context, and stall detection.
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 mod common;
 
 use std::cell::{Cell, RefCell};
@@ -93,6 +96,10 @@ fn sequential_runtimes_on_one_thread() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn spawn_outside_a_runtime_panics() {
     let msg = expect_panic(|| drop(spooly::spawn(async {})));
     assert!(
@@ -102,12 +109,20 @@ fn spawn_outside_a_runtime_panics() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn nested_block_on_panics() {
     let msg = expect_panic(|| spooly::block_on(async { spooly::block_on(async {}) }));
     assert!(msg.contains("nested `block_on`"), "{msg}");
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn nested_block_on_on_another_runtime_panics() {
     let msg = expect_panic(|| {
         spooly::block_on(async {
@@ -119,6 +134,10 @@ fn nested_block_on_on_another_runtime_panics() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn context_is_restored_after_a_panic() {
     let _ = expect_panic(|| spooly::block_on(async { panic!("boom") }));
     // The thread-local runtime was cleared on unwind, so this works.
@@ -129,12 +148,20 @@ fn context_is_restored_after_a_panic() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn stalled_main_panics() {
     let msg = expect_panic(|| spooly::block_on(never()));
     assert!(msg.contains("main future stalled"), "{msg}");
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn stalled_main_after_work_panics() {
     let msg = expect_panic(|| {
         spooly::block_on(async {
@@ -147,6 +174,10 @@ fn stalled_main_after_work_panics() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn main_waiting_on_a_dropped_waker_stalls() {
     // A task holds main's waker, then drops it without waking: main can never
     // be woken again, which is a provable stall.

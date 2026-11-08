@@ -1,5 +1,8 @@
 //! Everything is dropped exactly once, and nothing leaks.
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 mod common;
 
 use std::rc::{Rc, Weak};
@@ -90,6 +93,10 @@ fn main_future_is_dropped_when_block_on_returns() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn main_future_is_dropped_on_panic() {
     let counter = DropCounter::new();
     let tok = counter.token();
@@ -128,6 +135,10 @@ fn aborted_task_is_dropped_once_and_leaves_no_cycle() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn panicked_task_leaves_no_cycle() {
     let rc = Rc::new(());
     let weak = Rc::downgrade(&rc);

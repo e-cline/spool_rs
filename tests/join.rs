@@ -1,5 +1,8 @@
 //! `JoinHandle` behavior.
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 mod common;
 
 use std::future::Future;
@@ -50,6 +53,10 @@ fn handle_awaited_after_the_task_finished() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn polling_after_completion_panics() {
     let msg = expect_panic(|| {
         spooly::block_on(async {

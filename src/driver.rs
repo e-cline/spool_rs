@@ -5,6 +5,8 @@
 //! parking the thread ([`native`]). The browser driver (M9) will run steps
 //! from host callbacks instead.
 
+#[cfg(all(feature = "browser", target_arch = "wasm32"))]
+pub(crate) mod browser;
 pub(crate) mod native;
 
 use std::future::Future;
@@ -17,8 +19,9 @@ use crate::runtime::Main;
 use crate::waker::TaskHeader;
 
 /// A driver's main future, resumable across steps. `P` is how the future is
-/// held: `Pin<&mut F>` on the native driver's stack (so `block_on` accepts
-/// futures that aren't `'static`), or an owned `Pin<Box<F>>`.
+/// held (as a `Pin<P>`): `&mut F` on the native driver's stack (so
+/// `block_on` accepts futures that aren't `'static`), or an owned
+/// `Box<dyn Future>` in the browser driver.
 pub(crate) struct MainTask<P: DerefMut<Target: Future>> {
     future: Pin<P>,
     header: Arc<TaskHeader>,

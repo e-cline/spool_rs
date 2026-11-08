@@ -10,7 +10,10 @@
 //!   time, and the microtask queue drains completely after each.
 //! - **Deterministic tests.** A [`MockClock`] makes timers fire instantly, in
 //!   a fixed order.
-//! - **Zero dependencies** and no `unsafe` code.
+//! - **Native and the browser.** [`run`] and [`block_on`] drive the loop on
+//!   native targets; in the browser, `browser::start` drives it from JS
+//!   callbacks (see [In the browser](#in-the-browser)).
+//! - **Zero dependencies** on native targets, and no `unsafe` code.
 //!
 //! ```
 //! use std::{cell::RefCell, rc::Rc};
@@ -156,6 +159,16 @@
 //! unparked. While a detached task waits on another thread, hold a
 //! [`KeepAlive`] so that `run` doesn't exit first.
 //!
+//! ## In the browser
+//!
+//! On `wasm32-unknown-unknown`, enable the `browser` feature (which adds the
+//! crate's only dependency, `wasm-bindgen`) and start the loop with
+//! `spooly::browser::start(main)` instead of `run`. It returns at once, and
+//! each step of the loop then runs from a JS callback: a page can't block
+//! its thread. The ordering is the same as on native. The `browser` module
+//! docs (built for that target) have the details, and
+//! `examples/browser` in the repository is a small page.
+//!
 //! ## Testing
 //!
 //! Build the runtime with a [`MockClock`]: when the loop would sleep until
@@ -178,6 +191,8 @@
 
 #![warn(unreachable_pub)]
 
+#[cfg(all(feature = "browser", target_arch = "wasm32"))]
+pub mod browser;
 mod clock;
 mod context;
 mod driver;

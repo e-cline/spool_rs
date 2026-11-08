@@ -11,6 +11,9 @@
 //! Spooly doesn't catch panics (plan §6): any panic crashes the run at
 //! once, and the traces must match up to the crash.
 
+// Native only: needs proptest, and catching panics.
+#![cfg(not(target_arch = "wasm32"))]
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;

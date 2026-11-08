@@ -1,5 +1,8 @@
 //! Wakes that come from other threads (the remote path in design D9).
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 mod common;
 
 use std::sync::{Arc, Barrier, Mutex};
@@ -10,6 +13,7 @@ use std::time::Duration;
 use common::oneshot;
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn another_thread_wakes_main() {
     let (tx, rx) = oneshot();
     let worker = thread::spawn(move || {
@@ -22,6 +26,7 @@ fn another_thread_wakes_main() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn another_thread_wakes_a_spawned_task() {
     let out = spooly::block_on(async {
         let (tx, rx) = oneshot();
@@ -38,6 +43,7 @@ fn another_thread_wakes_a_spawned_task() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn many_threads_wake_many_tasks() {
     const N: usize = 32;
     let out = spooly::block_on(async {
@@ -62,10 +68,11 @@ fn many_threads_wake_many_tasks() {
         }
         sum
     });
-    assert_eq!(out, (0..N).sum());
+    assert_eq!(out, (0..N).sum::<usize>());
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn remote_wake_before_the_loop_parks() {
     // The worker wakes main immediately, possibly before main gets to park.
     // The thread's unpark token must prevent a lost wake-up.
@@ -78,6 +85,7 @@ fn remote_wake_before_the_loop_parks() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn remote_wake_after_task_finished_is_ignored() {
     let stash: Arc<Mutex<Option<Waker>>> = Arc::default();
     spooly::block_on(async {
@@ -95,6 +103,7 @@ fn remote_wake_after_task_finished_is_ignored() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn remote_wake_after_runtime_dropped_is_ignored() {
     let stash: Arc<Mutex<Option<Waker>>> = Arc::default();
     {
@@ -133,6 +142,7 @@ fn waker_woken_on_runtime_thread_while_not_running() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn a_remote_wake_interrupts_a_timer_wait() {
     // The loop is parked until a far-off timer; the remote wake must cut the
     // park short.
@@ -155,6 +165,7 @@ fn a_remote_wake_interrupts_a_timer_wait() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn remote_wakes_queued_while_idle_run_in_wake_order() {
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -196,6 +207,7 @@ fn remote_wakes_queued_while_idle_run_in_wake_order() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn racing_remote_and_local_wakes_are_deduplicated() {
     // A task re-registers its waker and yields; threads hammer it with
     // wakes meanwhile. It must finish, and never be polled more often than
@@ -244,6 +256,7 @@ fn racing_remote_and_local_wakes_are_deduplicated() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn many_threads_wake_main_repeatedly() {
     const PER_THREAD: usize = 200;
     const THREADS: usize = 8;
@@ -291,6 +304,7 @@ fn many_threads_wake_main_repeatedly() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn a_keep_alive_dropped_while_parked_on_a_timer() {
     // The unpark from the guard's drop is a spurious wake for a loop that is
     // waiting on a timer: it just goes back to waiting.

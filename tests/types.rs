@@ -18,6 +18,7 @@ assert_impl_all!(spooly::YieldNow: std::future::Future, Send, Sync, Unpin);
 assert_impl_all!(spooly::Runtime: Default, std::fmt::Debug);
 
 #[test]
+#[cfg(not(target_arch = "wasm32"))] // trybuild runs rustc.
 #[cfg_attr(miri, ignore = "trybuild runs rustc, which Miri can't do")]
 fn ui() {
     // The .stderr files pin the stable compiler's wording, which beta and

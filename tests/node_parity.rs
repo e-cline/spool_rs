@@ -27,6 +27,9 @@
 //! `node` on `PATH`). Otherwise, as in CI, only the Spooly half (the
 //! expectation) runs, so real-time jitter in Node can't fail a build.
 
+// Native only: needs running Node in a subprocess.
+#![cfg(not(target_arch = "wasm32"))]
+
 mod common;
 
 use std::path::Path;

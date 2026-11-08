@@ -228,13 +228,22 @@ pub(crate) fn default_clock() -> Rc<dyn Clock> {
     {
         Rc::new(SystemClock::new())
     }
-    // `std::time::Instant::now()` panics here, so fail early with a clearer
-    // message. The `browser` feature (M9) adds a `performance.now()` clock.
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "browser"))]
+    {
+        Rc::new(crate::browser::PerformanceClock::new())
+    }
+    // Without the `browser` feature there's no way to read the time here
+    // (`std::time::Instant::now()` panics), so fail early, with a clearer
+    // message.
+    #[cfg(all(
+        target_arch = "wasm32",
+        target_os = "unknown",
+        not(feature = "browser")
+    ))]
     {
         panic!(
-            "spooly: wasm32-unknown-unknown has no default clock; \
-             pass one with `Runtime::builder().clock(...)`"
+            "spooly: wasm32-unknown-unknown has no default clock without the `browser` \
+             feature; enable it, or pass a clock with `Runtime::builder().clock(...)`"
         )
     }
 }

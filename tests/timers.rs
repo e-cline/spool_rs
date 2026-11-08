@@ -1,6 +1,9 @@
 //! Timers, driven by `MockClock` so that every test is instant and
 //! deterministic (except the few marked "real clock").
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 mod common;
 
 use std::cell::{Cell, RefCell};
@@ -545,6 +548,10 @@ fn set_interval_callback_survives_cancelling_itself_mid_call() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn zero_period_intervals_panic() {
     let (rt, _clock) = mock();
     let msg = expect_panic(|| rt.block_on(async { spooly::set_interval(Duration::ZERO, |_| {}) }));
@@ -711,6 +718,10 @@ fn completed_timeout_does_not_keep_run_alive() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn timeout_polled_after_completion_panics() {
     let (rt, _clock) = mock();
     let msg = expect_panic(|| {
@@ -784,6 +795,10 @@ fn main_waiting_on_a_timer_is_not_stalled() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn main_pending_after_the_last_timer_stalls() {
     let (rt, _clock) = mock();
     let msg = expect_panic(|| {
@@ -796,6 +811,10 @@ fn main_pending_after_the_last_timer_stalls() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn timer_callback_panic_unwinds_out_of_run() {
     let (rt, _clock) = mock();
     let msg = expect_panic(|| rt.run(async { spooly::set_timeout(MS, || panic!("timer boom")) }));
@@ -851,6 +870,10 @@ fn handles_outliving_their_runtime_are_harmless() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn polling_a_sleep_after_its_runtime_is_gone_panics() {
     let (rt, _clock) = mock();
     // Create the Sleep inside the runtime, but don't await it there.
@@ -862,6 +885,10 @@ fn polling_a_sleep_after_its_runtime_is_gone_panics() {
 }
 
 #[test]
+#[cfg_attr(
+    target_arch = "wasm32",
+    ignore = "catches a panic, but WASM aborts on a panic"
+)]
 fn timer_apis_outside_a_runtime_panic() {
     for (name, f) in [
         (
@@ -898,16 +925,21 @@ fn timer_apis_outside_a_runtime_panic() {
 
 #[test]
 fn real_clock_sleep_takes_at_least_its_duration() {
+    // `std::time::Instant` panics in the browser; there, the default clock
+    // is `PerformanceClock`, checked inside.
+    #[cfg(not(target_arch = "wasm32"))]
     let start = std::time::Instant::now();
     spooly::block_on(async {
         let t0 = spooly::now();
         spooly::sleep(30 * MS).await;
         assert!(t0.elapsed() >= 30 * MS);
     });
+    #[cfg(not(target_arch = "wasm32"))]
     assert!(start.elapsed() >= 30 * MS);
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", ignore = "needs threads")]
 fn real_clock_remote_wake_interrupts_a_long_timer_wait() {
     let start = std::time::Instant::now();
     let (tx, rx) = oneshot();
