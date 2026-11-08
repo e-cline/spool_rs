@@ -2,11 +2,12 @@
 //! [`TimerHandle`]. The future-style timers live in the submodules.
 //!
 //! Every timer is an entry in a generational slab, plus an item in a binary
-//! heap keyed by `(deadline, seq)`. `seq` increases with every (re-)arm, so
-//! timers with equal deadlines fire in the order they were armed,
-//! and the timers phase can skip timers armed *during* the phase (D6).
-//! Cancelling removes the slab entry; its heap item goes stale and is
-//! skipped when it reaches the top (lazy deletion).
+//! heap keyed by `(deadline, seq)`. `seq` is unique to each (re-)arm, so
+//! timers with equal deadlines fire in the order they were armed, and an
+//! item is *live* only while its `seq` matches its entry's. Cancelling
+//! removes the entry, and re-arming gives it a new `seq`: either way the old
+//! heap item goes stale, and is skipped when it reaches the top (lazy
+//! deletion).
 
 mod interval;
 mod sleep;
@@ -37,8 +38,8 @@ pub(crate) type IntervalCallback = Rc<RefCell<Box<dyn FnMut(&TimerHandle)>>>;
 pub(crate) enum TimerState {
     /// Backs a [`Sleep`] future (also used by `Interval` and `Timeout`).
     Sleep { waker: Option<Waker>, fired: bool },
-    /// A `set_timeout` callback (taken when it fires).
-    Once(Option<Callback>),
+    /// A `set_timeout` callback.
+    Once(Callback),
     /// A `set_interval` callback.
     Interval {
         period: Duration,
@@ -48,9 +49,8 @@ pub(crate) enum TimerState {
 
 pub(crate) struct TimerEntry {
     deadline: Instant,
+    /// The `seq` of the entry's live heap item (its latest arming).
     seq: u64,
-    /// `true` while the entry has a live item in the heap.
-    armed: bool,
     pub(crate) state: TimerState,
 }
 
@@ -80,16 +80,18 @@ pub(crate) enum FireAction {
     Nothing,
 }
 
-type HeapItem = (Instant, u64, Key);
+/// A heap item: `(deadline, seq, key)`. Also what
+/// [`take_due`](TimerQueue::take_due) returns.
+pub(crate) type Due = (Instant, u64, Key);
 
 #[derive(Default)]
 pub(crate) struct TimerQueue {
     entries: Slab<TimerEntry>,
-    heap: BinaryHeap<Reverse<HeapItem>>,
-    /// Items set aside during a timers phase because they were armed after
-    /// the phase started. Restored by [`TimerQueue::end_phase`].
-    deferred: Vec<HeapItem>,
+    heap: BinaryHeap<Reverse<Due>>,
     next_seq: u64,
+    /// The buffer [`take_due`](Self::take_due) fills, kept between phases
+    /// so that a phase doesn't allocate.
+    spare: Vec<Due>,
 }
 
 impl TimerQueue {
@@ -98,7 +100,6 @@ impl TimerQueue {
         let key = self.entries.insert(TimerEntry {
             deadline,
             seq,
-            armed: true,
             state,
         });
         self.heap.push(Reverse((deadline, seq, key)));
@@ -109,12 +110,6 @@ impl TimerQueue {
         let seq = self.next_seq;
         self.next_seq += 1;
         seq
-    }
-
-    /// The `seq` the next armed timer will get. Timers with a lower `seq`
-    /// existed before this call.
-    pub(crate) fn next_seq(&self) -> u64 {
-        self.next_seq
     }
 
     pub(crate) fn contains(&self, key: Key) -> bool {
@@ -138,32 +133,22 @@ impl TimerQueue {
     /// `period`, skipping any deadlines already before `now` (D7). Does
     /// nothing if the timer was cancelled.
     pub(crate) fn rearm_interval(&mut self, key: Key, period: Duration, now: Instant) {
-        if let Some(entry) = self.entries.get(key) {
-            let deadline = next_interval_deadline(entry.deadline, period, now);
-            self.rearm(key, deadline);
-        }
-    }
-
-    /// Re-arms an existing timer with a new deadline (and a new `seq`).
-    pub(crate) fn rearm(&mut self, key: Key, deadline: Instant) {
         let seq = self.bump_seq();
         if let Some(entry) = self.entries.get_mut(key) {
+            let deadline = next_interval_deadline(entry.deadline, period, now);
             entry.deadline = deadline;
             entry.seq = seq;
-            entry.armed = true;
             self.heap.push(Reverse((deadline, seq, key)));
         }
     }
 
-    fn is_live(&self, &(deadline, seq, key): &(Instant, u64, Key)) -> bool {
-        matches!(
-            self.entries.get(key),
-            Some(e) if e.armed && e.seq == seq && e.deadline == deadline
-        )
+    /// `true` if `item` is its timer's latest arming.
+    fn is_live(&self, &(_, seq, key): &Due) -> bool {
+        self.entries.get(key).is_some_and(|entry| entry.seq == seq)
     }
 
     /// Pops stale heap items until the top is live, then returns it.
-    fn peek_live(&mut self) -> Option<(Instant, u64, Key)> {
+    fn peek_live(&mut self) -> Option<Due> {
         while let Some(&Reverse(top)) = self.heap.peek() {
             if self.is_live(&top) {
                 return Some(top);
@@ -176,82 +161,74 @@ impl TimerQueue {
     /// The earliest deadline among armed timers, if any. Armed timers are
     /// what keep the event loop alive.
     pub(crate) fn next_deadline(&mut self) -> Option<Instant> {
-        self.end_phase();
         self.peek_live().map(|(deadline, _, _)| deadline)
     }
 
-    /// Pops the next timer that is due at `now` and was armed before
-    /// `before_seq`, disarming it.
+    /// Takes every timer that is due at `now` out of the heap, in firing
+    /// order: the snapshot a timers phase works through (D6). Timers armed
+    /// later, during the phase, aren't in it, so they wait for the next
+    /// phase whatever their deadline.
     ///
-    /// Timers armed at or after `before_seq` (during the current phase) are
-    /// set aside rather than allowed to block older due timers behind them.
-    /// Call [`end_phase`](Self::end_phase) when the phase is over.
-    pub(crate) fn pop_expired(&mut self, now: Instant, before_seq: u64) -> Option<Key> {
-        loop {
-            let (deadline, seq, key) = self.peek_live()?;
-            if deadline > now {
-                return None;
+    /// Hand the list back with [`recycle`](Self::recycle) when done.
+    pub(crate) fn take_due(&mut self, now: Instant) -> Vec<Due> {
+        let mut due = std::mem::take(&mut self.spare);
+        while let Some(item) = self.peek_live() {
+            if item.0 > now {
+                break;
             }
             self.heap.pop();
-            if seq >= before_seq {
-                self.deferred.push((deadline, seq, key));
-                continue;
-            }
-            if let Some(entry) = self.entries.get_mut(key) {
-                entry.armed = false;
-            }
-            return Some(key);
+            due.push(item);
         }
+        due
     }
 
-    /// Puts back the items [`pop_expired`](Self::pop_expired) set aside.
-    pub(crate) fn end_phase(&mut self) {
-        self.heap.extend(self.deferred.drain(..).map(Reverse));
+    /// Puts back items from [`take_due`](Self::take_due) that a phase didn't
+    /// reach (it stopped early).
+    pub(crate) fn restore(&mut self, items: &[Due]) {
+        self.heap.extend(items.iter().copied().map(Reverse));
     }
 
-    /// Decides what firing `key` does. `Once` timers are removed here;
-    /// `Sleep` and `Interval` entries stay.
-    pub(crate) fn fire(&mut self, key: Key) -> (FireAction, Option<TimerEntry>) {
-        let Some(entry) = self.entries.get_mut(key) else {
-            return (FireAction::Nothing, None);
+    /// Keeps a list from [`take_due`](Self::take_due) for the next phase.
+    pub(crate) fn recycle(&mut self, mut due: Vec<Due>) {
+        due.clear();
+        self.spare = due;
+    }
+
+    /// Fires a due item, unless it went stale since it was taken (its timer
+    /// was cancelled or re-armed). Decides what firing does; `Once` timers
+    /// are removed here, `Sleep` and `Interval` entries stay.
+    pub(crate) fn fire(&mut self, (_, seq, key): Due) -> FireAction {
+        let entry = match self.entries.get_mut(key) {
+            Some(entry) if entry.seq == seq => entry,
+            _ => return FireAction::Nothing, // Stale.
         };
         match &mut entry.state {
             TimerState::Sleep { waker, fired } => {
                 *fired = true;
-                let action = waker.take().map_or(FireAction::Nothing, FireAction::Wake);
-                (action, None)
+                return waker.take().map_or(FireAction::Nothing, FireAction::Wake);
             }
             TimerState::Interval { period, callback } => {
-                (FireAction::Interval(Rc::clone(callback), *period), None)
+                return FireAction::Interval(Rc::clone(callback), *period);
             }
-            TimerState::Once(_) => {
-                let mut entry = self.remove(key);
-                let action = match entry.as_mut().map(|e| &mut e.state) {
-                    Some(TimerState::Once(cb)) => {
-                        cb.take().map_or(FireAction::Nothing, FireAction::Once)
-                    }
-                    _ => FireAction::Nothing,
-                };
-                (action, entry)
-            }
+            TimerState::Once(_) => {}
+        }
+        match self.remove(key).map(|entry| entry.state) {
+            Some(TimerState::Once(callback)) => FireAction::Once(callback),
+            _ => unreachable!(),
         }
     }
 
     /// Removes every timer. The caller drops them outside the borrow.
     pub(crate) fn take_all(&mut self) -> Vec<TimerEntry> {
         self.heap.clear();
-        self.deferred.clear();
+        self.spare = Vec::new();
         self.entries.drain()
     }
 
     /// Rebuilds the heap when stale items dominate it (for example, after
     /// many cancelled or reset timers).
     fn maybe_compact(&mut self) {
-        // Never compact mid-phase: `deferred` items must keep their place.
-        if self.deferred.is_empty()
-            && self.heap.len() > 64
-            && self.heap.len() > 4 * self.entries.len()
-        {
+        if self.heap.len() > 64 && self.heap.len() > 4 * self.entries.len() {
             let mut heap = std::mem::take(&mut self.heap).into_vec();
             heap.retain(|Reverse(item)| self.is_live(item));
             self.heap = BinaryHeap::from(heap);
@@ -372,7 +349,7 @@ pub fn set_timeout(delay: Duration, callback: impl FnOnce() + 'static) -> TimerH
     let key = inner
         .timers()
         .borrow_mut()
-        .insert(deadline, TimerState::Once(Some(Box::new(callback))));
+        .insert(deadline, TimerState::Once(Box::new(callback)));
     TimerHandle::new(Rc::downgrade(&inner), key)
 }
 
@@ -440,60 +417,78 @@ mod tests {
         }
     }
 
+    fn keys(due: &[Due]) -> Vec<Key> {
+        due.iter().map(|&(_, _, key)| key).collect()
+    }
+
     #[test]
-    fn pops_by_deadline_then_seq() {
+    fn take_due_returns_due_timers_by_deadline_then_seq() {
         let mut q = TimerQueue::default();
         let c = q.insert(at(30), sleep_state());
         let a = q.insert(at(10), sleep_state());
         let b = q.insert(at(10), sleep_state());
-        let cutoff = q.next_seq();
         assert_eq!(q.next_deadline(), Some(at(10)));
-        assert_eq!(q.pop_expired(at(100), cutoff), Some(a));
-        assert_eq!(q.pop_expired(at(100), cutoff), Some(b));
-        assert_eq!(q.pop_expired(at(100), cutoff), Some(c));
-        assert_eq!(q.pop_expired(at(100), cutoff), None);
+        assert_eq!(keys(&q.take_due(at(20))), [a, b]);
+        assert_eq!(q.next_deadline(), Some(at(30)), "`c` isn't due yet");
+        assert_eq!(keys(&q.take_due(at(100))), [c]);
+        assert!(q.take_due(at(100)).is_empty());
     }
 
     #[test]
-    fn respects_now_and_seq_cutoff() {
+    fn timers_armed_after_the_snapshot_wait_for_the_next_one() {
         let mut q = TimerQueue::default();
         let a = q.insert(at(5), sleep_state());
-        let cutoff = q.next_seq();
-        // Armed after the cutoff, with an earlier deadline: it sorts first.
+        let due = q.take_due(at(5));
+        // Armed mid-phase with a past deadline: not in this phase's snapshot.
         let late = q.insert(at(0), sleep_state());
-        assert_eq!(q.pop_expired(at(4), cutoff), None, "`a` isn't due yet");
-        // `late` is set aside instead of blocking `a`.
-        assert_eq!(q.pop_expired(at(5), cutoff), Some(a));
-        assert_eq!(q.pop_expired(at(5), cutoff), None);
-        q.end_phase();
-        // Next phase: a new cutoff lets `late` through.
-        let cutoff = q.next_seq();
-        assert_eq!(q.pop_expired(at(5), cutoff), Some(late));
-    }
-
-    #[test]
-    fn next_deadline_restores_deferred_items() {
-        let mut q = TimerQueue::default();
-        let cutoff = q.next_seq();
-        q.insert(at(0), sleep_state());
-        assert_eq!(q.pop_expired(at(0), cutoff), None);
-        // Even without an explicit `end_phase`, the deferred item counts.
+        assert_eq!(keys(&due), [a]);
         assert_eq!(q.next_deadline(), Some(at(0)));
+        assert_eq!(keys(&q.take_due(at(5))), [late]);
     }
 
     #[test]
-    fn removed_and_rearmed_items_go_stale() {
+    fn items_that_went_stale_after_the_snapshot_dont_fire() {
+        let mut q = TimerQueue::default();
+        let cancelled = q.insert(at(1), sleep_state());
+        let period = Duration::from_millis(10);
+        let callback: IntervalCallback = Rc::new(RefCell::new(Box::new(|_: &TimerHandle| {})));
+        let rearmed = q.insert(at(2), TimerState::Interval { period, callback });
+        let due = q.take_due(at(2));
+        assert_eq!(keys(&due), [cancelled, rearmed]);
+        drop(q.remove(cancelled));
+        q.rearm_interval(rearmed, period, at(2));
+        for item in due {
+            assert!(matches!(q.fire(item), FireAction::Nothing));
+        }
+        assert_eq!(q.next_deadline(), Some(at(12)), "the re-armed one is live");
+    }
+
+    #[test]
+    fn restore_puts_back_unreached_items() {
         let mut q = TimerQueue::default();
         let a = q.insert(at(1), sleep_state());
         let b = q.insert(at(2), sleep_state());
+        let due = q.take_due(at(2));
+        assert!(
+            matches!(q.fire(due[0]), FireAction::Nothing),
+            "no waker yet"
+        );
+        q.restore(&due[1..]);
+        assert_eq!(keys(&q.take_due(at(2))), [b]);
+        assert!(q.contains(a), "a fired sleep stays until it is polled");
+    }
+
+    #[test]
+    fn removed_items_go_stale() {
+        let mut q = TimerQueue::default();
+        let a = q.insert(at(1), sleep_state());
+        let b = q.insert(at(50), sleep_state());
         drop(q.remove(a));
-        q.rearm(b, at(50));
         assert_eq!(q.next_deadline(), Some(at(50)));
-        let cutoff = q.next_seq();
-        assert_eq!(q.pop_expired(at(10), cutoff), None);
-        assert_eq!(q.pop_expired(at(50), cutoff), Some(b));
-        assert_eq!(q.next_deadline(), None, "fired entries are disarmed");
-        assert!(q.contains(b), "but stay until removed");
+        assert!(q.take_due(at(10)).is_empty());
+        assert_eq!(keys(&q.take_due(at(50))), [b]);
+        assert_eq!(q.next_deadline(), None, "taken items leave the heap");
+        assert!(q.contains(b), "but the entry stays until removed");
     }
 
     #[test]
@@ -511,14 +506,11 @@ mod tests {
     }
 
     #[test]
-    fn fire_once_removes_and_returns_the_callback() {
+    fn fire_once_removes_the_timer_and_returns_its_callback() {
         let mut q = TimerQueue::default();
-        let k = q.insert(at(0), TimerState::Once(Some(Box::new(|| {}))));
-        let cutoff = q.next_seq();
-        assert_eq!(q.pop_expired(at(0), cutoff), Some(k));
-        let (action, entry) = q.fire(k);
-        assert!(matches!(action, FireAction::Once(_)));
-        assert!(entry.is_some());
+        let k = q.insert(at(0), TimerState::Once(Box::new(|| {})));
+        let due = q.take_due(at(0));
+        assert!(matches!(q.fire(due[0]), FireAction::Once(_)));
         assert!(!q.contains(k));
     }
 
@@ -526,12 +518,11 @@ mod tests {
     fn fire_sleep_marks_fired() {
         let mut q = TimerQueue::default();
         let k = q.insert(at(0), sleep_state());
-        let (action, entry) = q.fire(k);
+        let due = q.take_due(at(0));
         assert!(
-            matches!(action, FireAction::Nothing),
+            matches!(q.fire(due[0]), FireAction::Nothing),
             "no waker registered yet"
         );
-        assert!(entry.is_none());
         assert!(matches!(
             q.get_mut(k).unwrap().state,
             TimerState::Sleep { fired: true, .. }
@@ -542,7 +533,7 @@ mod tests {
     fn take_all_empties_everything() {
         let mut q = TimerQueue::default();
         q.insert(at(1), sleep_state());
-        q.insert(at(2), TimerState::Once(None));
+        q.insert(at(2), TimerState::Once(Box::new(|| {})));
         assert_eq!(q.take_all().len(), 2);
         assert_eq!(q.next_deadline(), None);
         assert_eq!(q.heap_len(), 0);
@@ -571,7 +562,7 @@ mod tests {
         let callback: IntervalCallback = Rc::new(RefCell::new(Box::new(|_: &TimerHandle| {})));
         let period = Duration::from_millis(10);
         let key = q.insert(at(10), TimerState::Interval { period, callback });
-        assert_eq!(q.pop_expired(at(10), q.next_seq()), Some(key));
+        assert_eq!(keys(&q.take_due(at(10))), [key]);
         q.rearm_interval(key, period, at(35));
         assert_eq!(q.next_deadline(), Some(at(40)));
         // A cancelled interval stays cancelled.

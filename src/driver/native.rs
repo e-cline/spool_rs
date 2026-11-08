@@ -6,7 +6,6 @@ use std::pin::pin;
 
 use crate::clock::{Clock, Instant};
 use crate::driver::MainTask;
-use crate::park;
 use crate::runtime::{Inner, Main, Step};
 
 const STALL_MESSAGE: &str = "spooly: main future stalled: it is pending but nothing can wake it \
@@ -46,7 +45,7 @@ pub(crate) fn drive<F: Future>(inner: &Inner, future: F, mode: Mode) -> F::Outpu
         match inner.step(&mut main) {
             Step::Busy => {}
             Step::WaitUntil(deadline) => wait_until(inner.clock(), deadline),
-            Step::WaitForWake => park::park(None),
+            Step::WaitForWake => std::thread::park(),
             Step::Idle if main.is_done() => return main.take_output(),
             Step::Idle => panic!("{STALL_MESSAGE}"),
         }
@@ -54,11 +53,13 @@ pub(crate) fn drive<F: Future>(inner: &Inner, future: F, mode: Mode) -> F::Outpu
 }
 
 /// Waits until `deadline`: lets the clock jump there if it can (a
-/// `MockClock`), else parks the thread (or until a remote wake).
+/// `MockClock`), else parks the thread until then, or until a remote wake
+/// unparks it. (Parking may also wake spuriously; the loop just steps
+/// again.)
 fn wait_until(clock: &dyn Clock, deadline: Instant) {
     let now = clock.now();
     if deadline <= now || clock.advance_when_idle(deadline) {
         return;
     }
-    park::park(Some(deadline.saturating_duration_since(now)));
+    std::thread::park_timeout(deadline.saturating_duration_since(now));
 }

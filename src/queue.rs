@@ -7,7 +7,6 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::fmt;
 
 use crate::context;
 use crate::task::TaskId;
@@ -21,15 +20,6 @@ pub(crate) enum Microtask {
     Poll(TaskId),
     /// Run a `queue_microtask` callback.
     Callback(Callback),
-}
-
-impl fmt::Debug for Microtask {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Microtask::Poll(id) => f.debug_tuple("Poll").field(id).finish(),
-            Microtask::Callback(_) => f.write_str("Callback(..)"),
-        }
-    }
 }
 
 /// A FIFO queue behind a `RefCell`. Borrows are only held inside these
@@ -137,11 +127,5 @@ mod tests {
         q.push(PushOnDrop(Some(q.clone())));
         drop(q.take_all()); // Must not panic with `BorrowMutError`.
         assert_eq!(q.len(), 1, "the drop-time push landed");
-    }
-
-    #[test]
-    fn microtask_debug() {
-        let cb = Microtask::Callback(Box::new(|| {}));
-        assert_eq!(format!("{cb:?}"), "Callback(..)");
     }
 }

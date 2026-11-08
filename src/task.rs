@@ -1,6 +1,6 @@
 //! Tasks, `spawn`, `JoinHandle`, and cancellation (`abort`).
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -44,15 +44,16 @@ enum JoinState<T> {
     /// The task was aborted (or dropped with its runtime, or unwound by a
     /// panic) before finishing.
     Aborted,
-    /// The result was taken by awaiting the handle.
+    /// The result was taken by awaiting the handle, or dropped with it.
     Consumed,
+    /// The handle was dropped while the task was still running: nobody will
+    /// take the output, so it is dropped as soon as the task completes.
+    Detached,
 }
 
 /// The state shared by a task and its `JoinHandle`.
 struct JoinCell<T> {
     state: RefCell<JoinState<T>>,
-    /// The `JoinHandle` was dropped: nobody will observe the result.
-    detached: Cell<bool>,
 }
 
 impl<T> JoinCell<T> {
@@ -68,6 +69,10 @@ impl<T> JoinCell<T> {
 
     fn is_pending(&self) -> bool {
         matches!(&*self.state.borrow(), JoinState::Pending { .. })
+    }
+
+    fn is_detached(&self) -> bool {
+        matches!(&*self.state.borrow(), JoinState::Detached)
     }
 }
 
@@ -113,7 +118,6 @@ where
 {
     let cell = Rc::new(JoinCell {
         state: RefCell::new(JoinState::Pending { waker: None }),
-        detached: Cell::new(false),
     });
     let guard = AbortGuard(Rc::clone(&cell));
     let wrapped = Box::pin(async move {
@@ -128,9 +132,8 @@ where
 }
 
 fn complete<T>(cell: &JoinCell<T>, output: T) {
-    if cell.detached.get() {
+    if cell.is_detached() {
         // Nobody wants the output: drop it here, outside of any borrow.
-        *cell.state.borrow_mut() = JoinState::Consumed;
         drop(output);
         return;
     }
@@ -275,7 +278,10 @@ impl<T> JoinHandle<T> {
             _ => match std::mem::replace(&mut *state, JoinState::Consumed) {
                 JoinState::Ready(output) => Poll::Ready(Ok(output)),
                 JoinState::Aborted => Poll::Ready(Err(JoinError(()))),
-                JoinState::Pending { .. } | JoinState::Consumed => unreachable!(),
+                // A live handle never sees `Detached`.
+                JoinState::Pending { .. } | JoinState::Consumed | JoinState::Detached => {
+                    unreachable!()
+                }
             },
         }
     }
@@ -297,17 +303,15 @@ impl<T> Future for JoinHandle<T> {
 
 impl<T> Drop for JoinHandle<T> {
     fn drop(&mut self) {
-        self.cell.detached.set(true);
         // Take what the handle owns (the joiner's waker, or a finished
         // result), and drop it outside the borrow.
         let old = {
             let mut state = self.cell.state.borrow_mut();
-            match &mut *state {
-                JoinState::Pending { waker } => JoinState::Pending {
-                    waker: waker.take(),
-                },
-                _ => std::mem::replace(&mut *state, JoinState::Consumed),
-            }
+            let next = match *state {
+                JoinState::Pending { .. } => JoinState::Detached,
+                _ => JoinState::Consumed,
+            };
+            std::mem::replace(&mut *state, next)
         };
         drop(old);
         if self.abort_on_drop {

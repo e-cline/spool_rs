@@ -225,9 +225,10 @@ step() -> Step:
     absorb remote wakes (other threads) → microtask queue; drain again
 
     // timers phase
-    now  = clock.now()
-    seq0 = timers.next_seq          // only timers that existed when the phase started
-    while let Some(t) = timers.pop_expired(now, before_seq = seq0):
+    now = clock.now()
+    due = timers.take_due(now)      // a snapshot: the timers due when the phase starts
+    for t in due:
+        if t was cancelled or re-armed since: skip it
         fire t   (run its callback / wake its future / re-arm if interval)
         drain_microtasks()
 
@@ -271,17 +272,19 @@ the thread.)*
 
 ### 3.4 Timers
 
-- Stored in a `BinaryHeap` keyed by `(deadline, seq)`. The `seq` number keeps
-  FIFO order among equal deadlines.
+- Stored in a `BinaryHeap` keyed by `(deadline, seq)`. Each arming (or
+  re-arming) gets a new `seq`, which keeps FIFO order among equal deadlines.
+  A heap item is live only while its `seq` matches its timer's latest one.
 - Entries live in a slab with generation counters. Cancelling marks the slot
   dead, and the heap skips dead entries when it pops them.
-- **D6. No delay clamp.** A zero delay is allowed. The `seq0` snapshot still
-  gives the behavior that matters: a timer scheduled *during* the timers
-  phase runs in the **next** step, so a timer that re-arms itself can't
-  starve the loop. *(M3 detail: a timer armed mid-phase with a deadline in
-  the past, via `sleep_until`, sorts to the top of the heap. It is set aside
-  for the rest of the phase so that it can't block older due timers behind
-  it.)*
+- **D6. No delay clamp.** A zero delay is allowed. The phase's snapshot
+  still gives the behavior that matters: a timer scheduled *during* the
+  timers phase runs in the **next** step, whatever its deadline, so a timer
+  that re-arms itself can't starve the loop. *(As built in M3, the phase
+  took due timers off the heap one at a time, up to a `seq` cutoff, and set
+  aside any armed mid-phase with a past deadline so they couldn't block
+  older ones. The snapshot, since the simplification pass after M9, needs
+  neither.)*
 - **D7. Intervals don't drift, and skip missed ticks** *(revised in v4;
   done in M7)*.
   An interval created at `t0` with period `p` is due at `t0 + p`,
@@ -902,5 +905,5 @@ that the hot paths are the ones every target shares.
 | M7.5 | Simpler panics (v5) | done | Remove `catch_unwind`, the panicked join state, unobserved-panic re-raising, and poisoning (D11). `JoinError` becomes an opaque "aborted" struct. Rewrite the panic tests, the model's panic handling, the docs, and the `panics` example for the new model. |
 | M8 | Non-blocking core | done | Split `drive()` into `step()` (D5) and a native driver; make main a resumable task; per-target default clock (D13); `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1` in CI. Settle the public-`step()` question (§10). No behavior change on native: the full suite must pass unchanged. |
 | M9 | Browser | done | Feature `browser`: `PerformanceClock`, the host-callback driver (D14), `browser::start`, an example page, and the suite (minus threads and panics) under `wasm-bindgen-test` in a headless browser in CI. |
-| M10 | WASI | | Make the suite (minus threads) pass under wasmtime on `wasm32-wasip1` (and `-wasip2` if it is no extra work), adding a WASI driver only if the native one doesn't work there; add it to CI. |
+| M10 | WASI | deferred | Make the suite (minus threads) pass under wasmtime on `wasm32-wasip1` (and `-wasip2` if it is no extra work), adding a WASI driver only if the native one doesn't work there; add it to CI. |
 | M11 | Performance | | §9.6, measured against `BENCHMARKS.md`. |

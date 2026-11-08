@@ -247,27 +247,22 @@ impl Inner {
         any
     }
 
-    /// The timers phase (§3.3). Fires every timer that is due at the phase's
-    /// start time and was armed before the phase started, draining the
-    /// microtask queue after each one.
+    /// The timers phase (§3.3). Fires the timers that are due at the phase's
+    /// start, in order, draining the microtask queue after each one. Timers
+    /// armed during the phase wait for the next one (D6), and a due timer
+    /// cancelled or re-armed before its turn is skipped.
     ///
     /// Returns `(fired_any, stop)`, where `stop` means `main` asked to stop.
     fn run_timers(&self, main: &mut dyn Main) -> (bool, bool) {
         let now = self.clock.now();
-        let cutoff = self.timers.borrow().next_seq();
-        let mut fired_any = false;
-        let stop = loop {
-            let next = self.timers.borrow_mut().pop_expired(now, cutoff);
-            let Some(key) = next else {
-                break false;
-            };
-            fired_any = true;
-            let (action, removed) = self.timers.borrow_mut().fire(key);
-            drop(removed);
+        let due = self.timers.borrow_mut().take_due(now);
+        for (i, &item) in due.iter().enumerate() {
+            let action = self.timers.borrow_mut().fire(item);
             match action {
                 FireAction::Wake(waker) => waker.wake(),
                 FireAction::Once(callback) => callback(),
                 FireAction::Interval(callback, period) => {
+                    let key = item.2;
                     let handle = TimerHandle::new(self.this.clone(), key);
                     (callback.borrow_mut())(&handle);
                     drop(callback);
@@ -279,13 +274,16 @@ impl Inner {
                 FireAction::Nothing => {}
             }
             if self.drain(main) {
-                break true;
+                // Stopping early: the rest stay due for a later phase.
+                let mut timers = self.timers.borrow_mut();
+                timers.restore(&due[i + 1..]);
+                timers.recycle(due);
+                return (true, true);
             }
-        };
-        // Timers armed past their deadline during the phase were set aside;
-        // they become due again.
-        self.timers.borrow_mut().end_phase();
-        (fired_any, stop)
+        }
+        let fired_any = !due.is_empty();
+        self.timers.borrow_mut().recycle(due);
+        (fired_any, false)
     }
 
     /// Drops every task, microtask, and timer, repeating until nothing
