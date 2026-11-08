@@ -12,8 +12,8 @@ WARNING: This is an experiment. Nothing here is not intended for production use.
   time, and the microtask queue drains after each.
 - Panics behave the same everywhere: Spooly never catches them, so a panic
   stops the loop. Errors a caller should handle are `Result` values.
-- Zero runtime dependencies on native targets (the optional `browser`
-  feature adds `wasm-bindgen`), and no `unsafe`.
+- Minimal dependencies: none at runtime on native targets today (the
+  optional `browser` feature adds `wasm-bindgen`), and no `unsafe`.
 
 ```rust
 use std::time::Duration;
@@ -125,8 +125,8 @@ CI runs them weekly:
 cargo test --release --test stress -- --ignored
 ```
 
-Benchmarks are dependency-free; the v1 baseline is in
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md):
+Benchmarks use a small built-in harness (no benchmark framework); the v1
+baseline is in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md):
 
 ```sh
 cargo bench

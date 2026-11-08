@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// A tiny deterministic PRNG (xorshift64*), to keep the tests dependency-free
-/// and reproducible.
+/// A tiny deterministic PRNG (xorshift64*), so the tests need no extra
+/// dependency and stay reproducible.
 struct Rng(u64);
 
 impl Rng {

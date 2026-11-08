@@ -38,9 +38,10 @@ spawned tasks. It runs natively and in WASM (browser and WASI).
 - **Panics behave the same on every target**: Spooly never catches them,
   so a panic anywhere stops the loop (§6). Recoverable errors are values
   (`Result`), as in synchronous Rust.
-- Zero runtime dependencies on native targets. Target-specific drivers may
-  depend on platform bindings behind feature flags (§7). No `unsafe` until
-  the performance phase (§9.6).
+- Minimal dependencies. Each one must earn its place; the native build
+  currently needs none at runtime. Target-specific drivers may depend on
+  platform bindings behind feature flags (§7). No `unsafe` until the
+  performance phase (§9.6).
 - A **thorough test suite**, with a reference model as the oracle (§8).
 
 ### Non-goals
@@ -398,7 +399,7 @@ way out is `sleep(Duration::ZERO).await`, which yields to the timers phase.
 
 ```
 spooly/
-├── Cargo.toml          # edition 2024; no dependencies on native targets
+├── Cargo.toml          # edition 2024; minimal dependencies
 ├── src/
 │   ├── lib.rs          # public re-exports + free functions
 │   ├── browser.rs      # (M9, feature "browser") start, start_on, PerformanceClock
@@ -670,7 +671,7 @@ Runtime::builder().clock(MockClock::new()).build()
 ## 8. Test suite
 
 The goal is a suite thorough enough that ordering bugs and soundness edge cases
-can't slip through. Runtime dependencies stay at zero. These test-only
+can't slip through. Runtime dependencies stay minimal. These test-only
 **dev-dependencies** are approved: `proptest`, `trybuild`, and
 `static_assertions`.
 

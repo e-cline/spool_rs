@@ -2,8 +2,8 @@
 //! They give the planned unsafe-performance phase (plan §9.6) a baseline to
 //! beat.
 //!
-//! Dependency-free (no criterion): each benchmark runs a batch of `n`
-//! operations several times, and reports the median and best time per
+//! A small built-in harness (no criterion): each benchmark runs a batch of
+//! `n` operations several times, and reports the median and best time per
 //! operation.
 //!
 //! ```sh

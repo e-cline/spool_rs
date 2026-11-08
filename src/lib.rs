@@ -13,7 +13,8 @@
 //! - **Native and the browser.** [`run`] and [`block_on`] drive the loop on
 //!   native targets; in the browser, `browser::start` drives it from JS
 //!   callbacks (see [In the browser](#in-the-browser)).
-//! - **Zero dependencies** on native targets, and no `unsafe` code.
+//! - **Minimal dependencies** (none at runtime on native targets), and no
+//!   `unsafe` code.
 //!
 //! ```
 //! use std::{cell::RefCell, rc::Rc};
