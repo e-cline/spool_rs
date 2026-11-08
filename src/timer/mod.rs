@@ -249,6 +249,22 @@ impl TimerQueue {
 /// to the same timer.
 ///
 /// `TimerHandle` is `!Send`: it belongs to the runtime's thread.
+///
+/// ```
+/// use std::time::Duration;
+/// use std::{cell::Cell, rc::Rc};
+///
+/// let fired = Rc::new(Cell::new(false));
+/// let f = fired.clone();
+/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// rt.run(async move {
+///     let handle = spool::set_timeout(Duration::from_secs(1), move || f.set(true));
+///     assert!(handle.is_active());
+///     handle.cancel(); // Like `clearTimeout(handle)`.
+///     assert!(!handle.is_active());
+/// });
+/// assert!(!fired.get());
+/// ```
 #[derive(Clone)]
 pub struct TimerHandle {
     inner: Weak<Inner>,

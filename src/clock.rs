@@ -20,6 +20,19 @@ use crate::context;
 ///
 /// Arithmetic that would overflow panics, like `std::time::Instant`. Use the
 /// `checked_*` methods to avoid that.
+///
+/// ```
+/// use std::time::Duration;
+/// use spool::Instant;
+///
+/// let a = Instant::from_epoch_offset(Duration::from_millis(250));
+/// let b = a + Duration::from_millis(750);
+/// assert_eq!(b.epoch_offset(), Duration::from_secs(1));
+/// assert_eq!(b - a, Duration::from_millis(750));
+/// assert_eq!(a.checked_duration_since(b), None); // `b` is later.
+/// assert_eq!(a.saturating_duration_since(b), Duration::ZERO);
+/// assert_eq!(Instant::MAX.checked_add(Duration::from_secs(1)), None);
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Instant(Duration);
 
@@ -129,6 +142,35 @@ impl Sub<Instant> for Instant {
 ///
 /// Spool ships with [`SystemClock`] (the default) and [`MockClock`] (for
 /// tests). Pass a clock to [`Builder::clock`](crate::Builder::clock).
+///
+/// A custom clock only needs [`now`](Clock::now). When the runtime is idle
+/// until a timer, it sleeps for `deadline - now()` of real time, so a custom
+/// clock should advance at real-time speed (or jump ahead itself, in
+/// [`advance_when_idle`](Clock::advance_when_idle), like [`MockClock`]).
+/// Here, a real-time clock whose epoch is an hour in the past:
+///
+/// ```
+/// use std::time::Duration;
+/// use spool::{Clock, Instant, SystemClock};
+///
+/// const HOUR: Duration = Duration::from_secs(3600);
+///
+/// struct StartedAnHourAgo(SystemClock);
+///
+/// impl Clock for StartedAnHourAgo {
+///     fn now(&self) -> Instant {
+///         self.0.now() + HOUR
+///     }
+/// }
+///
+/// let rt = spool::Runtime::builder()
+///     .clock(StartedAnHourAgo(SystemClock::new()))
+///     .build();
+/// let start = rt.now();
+/// assert!(start.epoch_offset() >= HOUR);
+/// rt.block_on(async { spool::sleep(Duration::from_millis(10)).await });
+/// assert!(rt.now() - start >= Duration::from_millis(10));
+/// ```
 pub trait Clock {
     /// The current time.
     fn now(&self) -> Instant;
@@ -144,6 +186,15 @@ pub trait Clock {
 }
 
 /// The real-time clock, backed by `std::time::Instant`. The default.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// let rt = spool::Runtime::builder().clock(spool::SystemClock::new()).build();
+/// let start = rt.now();
+/// rt.block_on(async { spool::sleep(Duration::from_millis(10)).await });
+/// assert!(rt.now() - start >= Duration::from_millis(10));
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct SystemClock {
     epoch: std::time::Instant,
@@ -213,7 +264,27 @@ impl MockClock {
         self.now.get()
     }
 
-    /// Moves time forward by `d`.
+    /// Moves time forward by `d`. Timers that become due fire in the next
+    /// timers phase.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// let clock = spool::MockClock::new();
+    /// let rt = spool::Runtime::builder().clock(clock.clone()).build();
+    /// let fired = rt.block_on(async {
+    ///     let sleep = spool::sleep(Duration::from_secs(5));
+    ///     clock.advance(Duration::from_secs(5));
+    ///     // Due now: completes in the next timers phase, with no jump.
+    ///     sleep.await;
+    ///     clock.elapsed()
+    /// });
+    /// assert_eq!(fired, Duration::from_secs(5));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// If the clock would overflow.
     pub fn advance(&self, d: Duration) {
         self.now.set(
             self.now
@@ -246,6 +317,17 @@ impl Clock for MockClock {
 }
 
 /// The current time on the current runtime's clock.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// rt.block_on(async {
+///     let start = spool::now();
+///     spool::sleep(Duration::from_millis(30)).await;
+///     assert_eq!(spool::now() - start, Duration::from_millis(30));
+/// });
+/// ```
 ///
 /// # Panics
 ///

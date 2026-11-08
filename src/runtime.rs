@@ -559,14 +559,39 @@ impl Runtime {
         self.inner.now()
     }
 
-    /// Returns a [`KeepAlive`] guard for this runtime. See
-    /// [`keep_alive`](crate::keep_alive).
+    /// Returns a [`KeepAlive`] guard for this runtime, which keeps
+    /// [`run`](Self::run) from exiting while it exists. Unlike
+    /// [`keep_alive`](crate::keep_alive), this works before the runtime is
+    /// running.
+    ///
+    /// ```
+    /// let rt = spool::Runtime::new();
+    /// let keep = rt.keep_alive();
+    /// std::thread::spawn(move || {
+    ///     // ... work that will wake a task on `rt` ...
+    ///     drop(keep);
+    /// });
+    /// rt.run(async {}); // Returns once `keep` is dropped.
+    /// ```
     pub fn keep_alive(&self) -> KeepAlive {
         self.inner.keep_alive()
     }
 
     /// Spawns a task onto this runtime. The task runs once the runtime is
-    /// driven by [`run`](Self::run) or [`block_on`](Self::block_on).
+    /// driven by [`run`](Self::run) or [`block_on`](Self::block_on). This
+    /// works without the runtime being entered, unlike [`spawn`](crate::spawn).
+    ///
+    /// ```
+    /// use std::{cell::RefCell, rc::Rc};
+    ///
+    /// let rt = spool::Runtime::new();
+    /// let log = Rc::new(RefCell::new(Vec::new()));
+    /// let l = log.clone();
+    /// let task = rt.spawn(async move { l.borrow_mut().push("pre-spawned") });
+    /// assert!(log.borrow().is_empty(), "nothing runs until the runtime is driven");
+    /// rt.block_on(task);
+    /// assert_eq!(*log.borrow(), ["pre-spawned"]);
+    /// ```
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + 'static,
@@ -644,6 +669,24 @@ impl Runtime {
     /// # Panics
     ///
     /// The same as [`run`](Self::run).
+    ///
+    /// ```
+    /// use std::{cell::Cell, rc::Rc};
+    ///
+    /// let rt = spool::Runtime::new();
+    /// let count = Rc::new(Cell::new(0));
+    /// let c = count.clone();
+    /// let n = rt.block_on(async move {
+    ///     let c2 = c.clone();
+    ///     // Queued, but not awaited: `block_on` doesn't wait for it.
+    ///     spool::queue_microtask(move || c2.set(c2.get() + 1));
+    ///     c.get()
+    /// });
+    /// assert_eq!((n, count.get()), (0, 0));
+    /// // The leftover microtask runs at the start of the next call.
+    /// rt.block_on(async {});
+    /// assert_eq!(count.get(), 1);
+    /// ```
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         let _enter = context::enter(&self.inner);
         self.inner.drive(future, Mode::BlockOn)

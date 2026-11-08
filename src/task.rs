@@ -241,6 +241,15 @@ impl<T> JoinHandle<T> {
     }
 
     /// Cancels the task. See [`AbortHandle::abort`].
+    ///
+    /// ```
+    /// spool::block_on(async {
+    ///     let task = spool::spawn(std::future::pending::<()>());
+    ///     task.abort();
+    ///     let err = task.try_join().await.unwrap_err();
+    ///     assert!(err.is_aborted());
+    /// });
+    /// ```
     pub fn abort(&self) {
         self.task.abort();
     }
@@ -364,6 +373,23 @@ impl<T> fmt::Debug for JoinHandle<T> {
 ///
 /// Unlike the `JoinHandle`, it doesn't own the task's output, and dropping it
 /// does nothing. `AbortHandle` is `!Send`.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// rt.block_on(async {
+///     let worker = spool::spawn(async {
+///         spool::sleep(Duration::from_secs(60)).await;
+///         "finished"
+///     });
+///     // A watchdog that cancels the worker after 5s.
+///     let abort = worker.abort_handle();
+///     spool::set_timeout(Duration::from_secs(5), move || abort.abort());
+///     assert!(worker.try_join().await.unwrap_err().is_aborted());
+///     assert_eq!(spool::now().epoch_offset(), Duration::from_secs(5));
+/// });
+/// ```
 #[derive(Clone)]
 pub struct AbortHandle {
     inner: Weak<Inner>,
@@ -410,6 +436,31 @@ impl fmt::Debug for AbortHandle {
 /// [`JoinHandle::abort_on_drop`].
 ///
 /// Awaiting it behaves exactly like awaiting the `JoinHandle`.
+///
+/// ```
+/// use std::{cell::Cell, rc::Rc};
+///
+/// spool::block_on(async {
+///     let beats = Rc::new(Cell::new(0));
+///     {
+///         let b = beats.clone();
+///         // A heartbeat that lives exactly as long as this scope.
+///         let _heartbeat = spool::spawn(async move {
+///             loop {
+///                 b.set(b.get() + 1);
+///                 spool::yield_now().await;
+///             }
+///         })
+///         .abort_on_drop();
+///         for _ in 0..3 {
+///             spool::yield_now().await;
+///         }
+///     }
+///     let seen = beats.get();
+///     spool::yield_now().await;
+///     assert_eq!(beats.get(), seen, "aborted at the end of the scope");
+/// });
+/// ```
 #[must_use = "dropping an AbortOnDrop aborts the task"]
 pub struct AbortOnDrop<T> {
     handle: JoinHandle<T>,
@@ -457,6 +508,17 @@ impl<T> fmt::Debug for AbortOnDrop<T> {
 
 /// The future returned by [`JoinHandle::try_join`]: the task's output, or a
 /// [`JoinError`] if it panicked or was aborted.
+///
+/// ```
+/// spool::block_on(async {
+///     let ok = spool::spawn(async { 1 }).try_join().await;
+///     assert_eq!(ok.unwrap(), 1);
+///     let tj = spool::spawn(std::future::pending::<i32>()).try_join();
+///     tj.abort();
+///     assert!(tj.is_finished());
+///     assert!(tj.await.is_err());
+/// });
+/// ```
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct TryJoin<T> {
     handle: JoinHandle<T>,
@@ -491,6 +553,21 @@ impl<T> fmt::Debug for TryJoin<T> {
 }
 
 /// Why a task produced no output, returned by [`JoinHandle::try_join`].
+///
+/// ```
+/// use spool::JoinError;
+///
+/// spool::block_on(async {
+///     match spool::spawn(async { panic!("bad input") }).try_join().await {
+///         Ok(()) => unreachable!(),
+///         Err(JoinError::Panicked(payload)) => {
+///             assert_eq!(payload.downcast_ref::<&str>(), Some(&"bad input"));
+///             // Or re-throw it: std::panic::resume_unwind(payload).
+///         }
+///         Err(JoinError::Aborted) => unreachable!(),
+///     }
+/// });
+/// ```
 pub enum JoinError {
     /// The task panicked. Holds the panic payload, which can be re-thrown
     /// with [`std::panic::resume_unwind`].

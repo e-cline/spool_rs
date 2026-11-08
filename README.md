@@ -34,8 +34,23 @@ spool::run(async {
 > (cancellation and panics: `abort`, `AbortHandle`, `abort_on_drop`,
 > `try_join`, the JS-exception panic model, poisoning), and M5 (liveness and
 > threads: `KeepAlive`, stronger stall detection, randomized differential
-> tests against Node). Next up is polish (M6). See
+> tests against Node), and M6 (polish: a guide-style rustdoc with JS
+> equivalence tables, examples, stress tests, benchmarks, a coverage gate).
+> The v1 plan is complete; next is the performance phase. See
 > [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md).
+
+The crate docs (`cargo doc --open`) are the guide: the JS-to-Spool table, the
+event loop, cancellation, panics, threads, and testing with `MockClock`.
+
+## Examples
+
+```sh
+cargo run --example hello          # tasks interleaving at each `.await`
+cargo run --example timers         # the program above: ticks, microtasks, tasks, timers
+cargo run --example cancellation   # timeouts, abort, abort_on_drop, cancelling timers
+cargo run --example panics         # try_join, re-throwing, unobserved panics, poisoning
+cargo run --example threads        # waking `!Send` tasks from worker threads, KeepAlive
+```
 
 ## Development
 
@@ -55,4 +70,26 @@ compares the traces. To search harder:
 
 ```sh
 SPOOL_FUZZ_CASES=5000 SPOOL_FUZZ_SEED=7 cargo test --test fuzz_ordering
+```
+
+Stress tests (a million tasks, 100k timers with random cancellation, very
+long tick and join chains, heavy cross-thread waking) are `#[ignore]`d; CI
+runs them weekly:
+
+```sh
+cargo test --release --test stress -- --ignored
+```
+
+Benchmarks are dependency-free; the v1 baseline is in
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md):
+
+```sh
+cargo bench
+```
+
+Coverage (CI requires at least 90% of lines):
+
+```sh
+cargo install cargo-llvm-cov   # once
+cargo llvm-cov --fail-under-lines 90
 ```

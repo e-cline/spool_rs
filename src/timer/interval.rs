@@ -47,6 +47,28 @@ pub fn interval(period: Duration) -> Interval {
 /// A stream of ticks, created by [`interval`].
 ///
 /// `Interval` is `!Send`, and `Unpin`.
+///
+/// `tick` is cancel-safe, so an `Interval` works well in a loop that races
+/// it against other work, here with [`timeout`](crate::timeout):
+///
+/// ```
+/// use std::time::Duration;
+///
+/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// rt.block_on(async {
+///     let mut every_10s = spool::interval(Duration::from_secs(10));
+///     assert_eq!(every_10s.period(), Duration::from_secs(10));
+///     every_10s.tick().await; // The first tick is immediate.
+///     let mut ticks = 0;
+///     // Wait up to 3s at a time: the dropped `tick` futures lose nothing.
+///     while ticks < 2 {
+///         if spool::timeout(Duration::from_secs(3), every_10s.tick()).await.is_ok() {
+///             ticks += 1;
+///         }
+///     }
+///     assert_eq!(spool::now().epoch_offset(), Duration::from_secs(20));
+/// });
+/// ```
 #[derive(Debug)]
 pub struct Interval {
     sleep: Sleep,

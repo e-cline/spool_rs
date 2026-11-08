@@ -43,6 +43,20 @@ pub fn sleep(duration: Duration) -> Sleep {
 /// Waits until `deadline` on the current runtime's clock. A deadline in the
 /// past completes in the next timers phase.
 ///
+/// ```
+/// use std::time::Duration;
+///
+/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// rt.block_on(async {
+///     let start = spool::now();
+///     // A fixed schedule, unaffected by how long each step takes.
+///     for step in 1..=3 {
+///         spool::sleep_until(start + Duration::from_secs(step)).await;
+///     }
+///     assert_eq!(spool::now() - start, Duration::from_secs(3));
+/// });
+/// ```
+///
 /// # Panics
 ///
 /// If called outside a Spool runtime.
@@ -53,7 +67,23 @@ pub fn sleep_until(deadline: Instant) -> Sleep {
 
 /// The future returned by [`sleep`] and [`sleep_until`].
 ///
-/// `Sleep` is `!Send`, and `Unpin`.
+/// `Sleep` is `!Send`, and `Unpin`. Its timer is armed when it is created,
+/// and cancelled when it is dropped.
+///
+/// ```
+/// use std::time::Duration;
+///
+/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// rt.block_on(async {
+///     let mut sleep = spool::sleep(Duration::from_secs(1));
+///     assert!(!sleep.is_elapsed());
+///     // Push the deadline out, e.g. to debounce.
+///     sleep.reset(sleep.deadline() + Duration::from_secs(1));
+///     (&mut sleep).await;
+///     assert!(sleep.is_elapsed());
+///     assert_eq!(spool::now().epoch_offset(), Duration::from_secs(2));
+/// });
+/// ```
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct Sleep {
     inner: Weak<Inner>,

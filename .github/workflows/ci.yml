@@ -36,7 +36,21 @@ jobs:
       - run: cargo test --doc
       - name: Stress tests
         if: github.event_name == 'schedule'
-        run: cargo test --release -- --ignored
+        run: cargo test --release --test stress -- --ignored
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Line coverage (at least 90%)
+        run: cargo llvm-cov --all-targets --fail-under-lines 90 --summary-only
 
   lint:
     runs-on: ubuntu-latest
@@ -48,6 +62,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets
       - run: cargo doc --no-deps
+      - name: Benchmarks compile
+        run: cargo bench --no-run
 
   miri:
     runs-on: ubuntu-latest

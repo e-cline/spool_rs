@@ -687,7 +687,8 @@ can't slip through. Runtime dependencies stay at zero. These test-only
 - Task names or ids, and a debug dump of the queues and timers.
 
 ### 9.6 Performance phase (`unsafe`)
-v1 is entirely safe code. After the benchmarks in M6 exist, a profiling-driven
+v1 is entirely safe code. The M6 benchmarks (baseline in
+[`BENCHMARKS.md`](BENCHMARKS.md)) are the starting point: a profiling-driven
 pass may switch to `unsafe` in the hot paths where it is clearly worth it:
 - **Single-allocation tasks**: header, future, and output in one allocation,
   with a hand-written `RawWaker` vtable, instead of `Box<dyn Future>` + slab +

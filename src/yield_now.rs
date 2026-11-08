@@ -28,7 +28,11 @@ pub fn yield_now() -> YieldNow {
     YieldNow { yielded: false }
 }
 
-/// The future returned by [`yield_now`].
+/// The future returned by [`yield_now`]. See there for an example.
+///
+/// It completes on its second poll; the first poll wakes the task (queueing
+/// it behind everything already in the microtask queue) and returns
+/// `Pending`. It holds no runtime state, so it is `Send`, `Sync`, and `Unpin`.
 #[derive(Debug)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct YieldNow {

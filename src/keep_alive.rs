@@ -99,7 +99,15 @@ impl fmt::Debug for KeepAlive {
     }
 }
 
-/// Returns a [`KeepAlive`] guard for the current runtime.
+/// Returns a [`KeepAlive`] guard for the current runtime. See
+/// [`KeepAlive`] for a full example.
+///
+/// ```
+/// spool::run(async {
+///     let keep = spool::keep_alive();
+///     std::thread::spawn(move || drop(keep)); // `run` waits for this drop.
+/// });
+/// ```
 ///
 /// # Panics
 ///

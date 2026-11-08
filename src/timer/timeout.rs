@@ -41,6 +41,21 @@ pub fn timeout<F: Future>(duration: Duration, future: F) -> Timeout<F> {
 
 /// Like [`timeout`], with an absolute deadline.
 ///
+/// ```
+/// use std::time::Duration;
+///
+/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// rt.block_on(async {
+///     // One deadline shared by several steps.
+///     let deadline = spool::now() + Duration::from_secs(5);
+///     let first = spool::timeout_at(deadline, spool::sleep(Duration::from_secs(3))).await;
+///     assert!(first.is_ok());
+///     let second = spool::timeout_at(deadline, spool::sleep(Duration::from_secs(3))).await;
+///     assert!(second.is_err(), "only 2s were left");
+///     assert_eq!(spool::now(), deadline);
+/// });
+/// ```
+///
 /// # Panics
 ///
 /// If called outside a Spool runtime.
@@ -55,6 +70,20 @@ pub fn timeout_at<F: Future>(deadline: Instant, future: F) -> Timeout<F> {
 ///
 /// The inner future is boxed, which keeps `Timeout` free of `unsafe` pin
 /// projection. (Plan §9.6 lists removing this allocation.)
+///
+/// The timer starts when the `Timeout` is created, not when it is first
+/// polled:
+///
+/// ```
+/// use std::time::Duration;
+///
+/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// rt.block_on(async {
+///     let t = spool::timeout(Duration::from_secs(2), async { "done" });
+///     assert_eq!(t.deadline().epoch_offset(), Duration::from_secs(2));
+///     assert_eq!(t.await, Ok("done"));
+/// });
+/// ```
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct Timeout<F: Future> {
     future: Option<Pin<Box<F>>>,
@@ -99,6 +128,13 @@ impl<F: Future> fmt::Debug for Timeout<F> {
 }
 
 /// The error returned by [`timeout`] when the time runs out.
+///
+/// ```
+/// let err = spool::Elapsed::new();
+/// assert_eq!(err.to_string(), "deadline has elapsed");
+/// let boxed: Box<dyn std::error::Error> = Box::new(err); // Works with `?`.
+/// # drop(boxed);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Elapsed(());
 
