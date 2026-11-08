@@ -4,6 +4,8 @@
 scheduling model inspired by the JavaScript event loop. It targets native
 platforms and WASM (browser and WASI support are in progress).
 
+WARNING: This is an experiment. Nothing here is not intended for production use.
+
 - No `Send` or `Sync` required: use `Rc`, `RefCell`, and `Cell` freely in tasks.
 - Simple, predictable ordering: a woken task is queued as a microtask, in
   FIFO order, like the code after an `await` in JS. Timers run one at a
