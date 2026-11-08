@@ -54,7 +54,8 @@ with `MockClock`.
 
 ```sh
 cargo run --example hello          # tasks interleaving at each `.await`
-cargo run --example timers         # the program above, plus an interval
+cargo run --example timers         # the program above
+cargo run --example intervals      # intervals on a fixed schedule, shared state
 cargo run --example cancellation   # timeouts, abort, abort_on_drop, cancelling timers
 cargo run --example panics         # errors as `Result`s, try_join on abort, a panic stopping the loop
 cargo run --example threads        # waking `!Send` tasks from worker threads, KeepAlive
