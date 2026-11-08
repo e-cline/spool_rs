@@ -1,4 +1,4 @@
-//! The panic model (§6 of the plan): Spool doesn't catch panics. Every kind
+//! The panic model (§6 of the plan): Spooly doesn't catch panics. Every kind
 //! of panic unwinds straight out of `run` / `block_on` and stops the loop at
 //! once, and the runtime can still be dropped cleanly afterwards.
 //!
@@ -15,15 +15,15 @@ use common::{DropCounter, Trace, expect_panic, never};
 
 #[test]
 fn panic_in_main_unwinds_out_of_block_on() {
-    let msg = expect_panic(|| spool::block_on(async { panic!("main boom") }));
+    let msg = expect_panic(|| spooly::block_on(async { panic!("main boom") }));
     assert_eq!(msg, "main boom");
 }
 
 #[test]
 fn panic_in_main_unwinds_out_of_run() {
     let msg = expect_panic(|| {
-        spool::run(async {
-            spool::yield_now().await;
+        spooly::run(async {
+            spooly::yield_now().await;
             panic!("main boom")
         })
     });
@@ -32,17 +32,17 @@ fn panic_in_main_unwinds_out_of_run() {
 
 #[test]
 fn panics_in_callbacks_unwind_out_at_once() {
-    let msg = expect_panic(|| spool::run(async { spool::queue_microtask(|| panic!("micro")) }));
+    let msg = expect_panic(|| spooly::run(async { spooly::queue_microtask(|| panic!("micro")) }));
     assert_eq!(msg, "micro");
     let msg = expect_panic(|| {
-        spool::run(async {
-            spool::set_timeout(Duration::ZERO, || panic!("timer"));
+        spooly::run(async {
+            spooly::set_timeout(Duration::ZERO, || panic!("timer"));
         })
     });
     assert_eq!(msg, "timer");
     let msg = expect_panic(|| {
-        spool::run(async {
-            spool::set_interval(Duration::from_millis(1), |_| panic!("interval"));
+        spooly::run(async {
+            spooly::set_interval(Duration::from_millis(1), |_| panic!("interval"));
         })
     });
     assert_eq!(msg, "interval");
@@ -53,10 +53,10 @@ fn panics_in_callbacks_unwind_out_at_once() {
 #[test]
 fn panic_in_a_detached_task_unwinds_out() {
     let msg = expect_panic(|| {
-        spool::block_on(async {
-            drop(spool::spawn(async { panic!("task boom") }));
-            spool::yield_now().await;
-            spool::yield_now().await;
+        spooly::block_on(async {
+            drop(spooly::spawn(async { panic!("task boom") }));
+            spooly::yield_now().await;
+            spooly::yield_now().await;
         })
     });
     assert_eq!(msg, "task boom");
@@ -67,9 +67,9 @@ fn panic_in_an_awaited_task_unwinds_out_not_into_the_awaiter() {
     let trace = Trace::new();
     let t = trace.clone();
     let msg = expect_panic(move || {
-        spool::block_on(async move {
-            let h = spool::spawn(async {
-                spool::yield_now().await;
+        spooly::block_on(async move {
+            let h = spooly::spawn(async {
+                spooly::yield_now().await;
                 panic!("later boom");
             });
             h.await;
@@ -83,8 +83,8 @@ fn panic_in_an_awaited_task_unwinds_out_not_into_the_awaiter() {
 #[test]
 fn try_join_does_not_catch_a_panic() {
     let msg = expect_panic(|| {
-        spool::block_on(async {
-            spool::spawn(async { panic!("not caught") })
+        spooly::block_on(async {
+            spooly::spawn(async { panic!("not caught") })
                 .try_join()
                 .await
         })
@@ -95,7 +95,7 @@ fn try_join_does_not_catch_a_panic() {
 #[test]
 fn the_payload_is_preserved() {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        spool::block_on(async { spool::spawn(async { panic_any(42_i32) }).await })
+        spooly::block_on(async { spooly::spawn(async { panic_any(42_i32) }).await })
     }));
     assert_eq!(*result.unwrap_err().downcast::<i32>().unwrap(), 42);
 }
@@ -105,16 +105,16 @@ fn a_panic_stops_the_loop_at_once() {
     let trace = Trace::new();
     let t = trace.clone();
     let msg = expect_panic(move || {
-        spool::run(async move {
+        spooly::run(async move {
             let (t1, t2, t3) = (t.clone(), t.clone(), t.clone());
-            drop(spool::spawn(async move {
+            drop(spooly::spawn(async move {
                 t1.log("bad runs");
                 panic!("stop");
             }));
-            drop(spool::spawn(async move {
+            drop(spooly::spawn(async move {
                 t2.log("queued after (must not run)")
             }));
-            spool::set_timeout(Duration::ZERO, move || t3.log("timer (must not run)"));
+            spooly::set_timeout(Duration::ZERO, move || t3.log("timer (must not run)"));
             t.log("main");
         })
     });
@@ -124,12 +124,12 @@ fn a_panic_stops_the_loop_at_once() {
 
 #[test]
 fn panic_in_a_task_after_a_sleep() {
-    let clock = spool::MockClock::new();
-    let rt = spool::Runtime::builder().clock(clock.clone()).build();
+    let clock = spooly::MockClock::new();
+    let rt = spooly::Runtime::builder().clock(clock.clone()).build();
     let msg = expect_panic(|| {
         rt.run(async {
-            drop(spool::spawn(async {
-                spool::sleep(Duration::from_secs(1)).await;
+            drop(spooly::spawn(async {
+                spooly::sleep(Duration::from_secs(1)).await;
                 panic!("after sleep");
             }));
         })
@@ -141,8 +141,8 @@ fn panic_in_a_task_after_a_sleep() {
 #[test]
 fn the_aborted_panic_unwinds_out_like_any_other() {
     let msg = expect_panic(|| {
-        spool::block_on(async {
-            let h = spool::spawn(never());
+        spooly::block_on(async {
+            let h = spooly::spawn(never());
             h.abort();
             h.await
         })
@@ -155,13 +155,13 @@ fn the_aborted_panic_unwinds_out_like_any_other() {
 #[test]
 fn a_panicking_tasks_future_is_dropped_once() {
     let counter = DropCounter::new();
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     let tok = counter.token();
     let _ = expect_panic(|| {
         rt.block_on(async move {
-            drop(spool::spawn(async move {
+            drop(spooly::spawn(async move {
                 let _tok = tok;
-                spool::yield_now().await;
+                spooly::yield_now().await;
                 panic!("drop me");
             }));
             never().await;
@@ -174,16 +174,16 @@ fn a_panicking_tasks_future_is_dropped_once() {
 
 #[test]
 fn a_panicking_tasks_handle_resolves_as_aborted() {
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     let h = rt.spawn(async { panic!("p") });
-    let _ = expect_panic(|| rt.block_on(async { spool::yield_now().await }));
+    let _ = expect_panic(|| rt.block_on(async { spooly::yield_now().await }));
     assert!(h.is_finished());
 }
 
 #[test]
 fn the_runtime_still_drops_its_tasks_and_timers() {
     let counter = DropCounter::new();
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     for _ in 0..3 {
         let tok = counter.token();
         drop(rt.spawn(async move {
@@ -194,8 +194,8 @@ fn the_runtime_still_drops_its_tasks_and_timers() {
     let _ = expect_panic(|| {
         rt.block_on(async {
             let tok = counter.token();
-            spool::set_timeout(Duration::from_secs(60), move || drop(tok));
-            spool::yield_now().await;
+            spooly::set_timeout(Duration::from_secs(60), move || drop(tok));
+            spooly::yield_now().await;
             panic!("boom");
         })
     });
@@ -207,16 +207,16 @@ fn the_runtime_still_drops_its_tasks_and_timers() {
 #[test]
 fn a_panic_in_a_timer_phase_still_drops_cleanly() {
     let counter = DropCounter::new();
-    let clock = spool::MockClock::new();
-    let rt = spool::Runtime::builder().clock(clock.clone()).build();
+    let clock = spooly::MockClock::new();
+    let rt = spooly::Runtime::builder().clock(clock.clone()).build();
     let (c, clk) = (counter.clone(), clock.clone());
     let _ = expect_panic(|| {
         rt.run(async move {
-            spool::set_timeout(Duration::ZERO, move || {
+            spooly::set_timeout(Duration::ZERO, move || {
                 // Armed in the past during the phase: set aside for the next.
                 clk.advance(Duration::from_millis(5));
                 let tok = c.token();
-                spool::set_timeout(Duration::ZERO, move || drop(tok));
+                spooly::set_timeout(Duration::ZERO, move || drop(tok));
                 panic!("mid-phase");
             });
         })
@@ -228,28 +228,28 @@ fn a_panic_in_a_timer_phase_still_drops_cleanly() {
 #[test]
 fn a_fresh_runtime_works_after_a_panic() {
     let _ = expect_panic(|| {
-        spool::block_on(async {
-            drop(spool::spawn(async { panic!("x") }));
-            spool::yield_now().await;
+        spooly::block_on(async {
+            drop(spooly::spawn(async { panic!("x") }));
+            spooly::yield_now().await;
         })
     });
     assert_eq!(
-        spool::block_on(async { spool::spawn(async { 1 }).await }),
+        spooly::block_on(async { spooly::spawn(async { 1 }).await }),
         1
     );
 }
 
 #[test]
 fn a_panic_leaves_no_runtime_entered() {
-    let _ = expect_panic(|| spool::block_on(async { panic!("x") }));
-    let msg = expect_panic(|| spool::spawn(async {}));
-    assert!(msg.contains("outside of a Spool runtime"), "{msg}");
+    let _ = expect_panic(|| spooly::block_on(async { panic!("x") }));
+    let msg = expect_panic(|| spooly::spawn(async {}));
+    assert!(msg.contains("outside of a Spooly runtime"), "{msg}");
 }
 
 #[test]
 fn a_nested_block_on_panic_leaves_the_inner_runtime_usable() {
-    let other = spool::Runtime::new();
-    let msg = expect_panic(|| spool::block_on(async { other.block_on(async {}) }));
+    let other = spooly::Runtime::new();
+    let msg = expect_panic(|| spooly::block_on(async { other.block_on(async {}) }));
     assert!(msg.contains("nested"), "{msg}");
     assert_eq!(other.block_on(async { 5 }), 5);
 }

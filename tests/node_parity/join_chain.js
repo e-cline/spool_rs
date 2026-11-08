@@ -1,6 +1,6 @@
 // Twin of `join_chain` in tests/node_parity.rs.
 //
-// A Spool `JoinHandle` maps to a deferred promise that the task resolves as
+// A Spooly `JoinHandle` maps to a deferred promise that the task resolves as
 // its last action; awaiting the handle is `await deferred.promise`.
 function deferred() {
   let resolve;

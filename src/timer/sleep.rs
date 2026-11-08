@@ -21,16 +21,16 @@ use crate::slab::Key;
 ///
 /// # Panics
 ///
-/// If called outside a Spool runtime.
+/// If called outside a Spooly runtime.
 ///
 /// ```
 /// use std::time::Duration;
 ///
-/// let clock = spool::MockClock::new();
-/// let rt = spool::Runtime::builder().clock(clock.clone()).build();
+/// let clock = spooly::MockClock::new();
+/// let rt = spooly::Runtime::builder().clock(clock.clone()).build();
 /// rt.block_on(async {
-///     let start = spool::now();
-///     spool::sleep(Duration::from_millis(250)).await;
+///     let start = spooly::now();
+///     spooly::sleep(Duration::from_millis(250)).await;
 ///     assert_eq!(start.elapsed(), Duration::from_millis(250));
 /// });
 /// ```
@@ -46,20 +46,20 @@ pub fn sleep(duration: Duration) -> Sleep {
 /// ```
 /// use std::time::Duration;
 ///
-/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// let rt = spooly::Runtime::builder().clock(spooly::MockClock::new()).build();
 /// rt.block_on(async {
-///     let start = spool::now();
+///     let start = spooly::now();
 ///     // A fixed schedule, unaffected by how long each step takes.
 ///     for step in 1..=3 {
-///         spool::sleep_until(start + Duration::from_secs(step)).await;
+///         spooly::sleep_until(start + Duration::from_secs(step)).await;
 ///     }
-///     assert_eq!(spool::now() - start, Duration::from_secs(3));
+///     assert_eq!(spooly::now() - start, Duration::from_secs(3));
 /// });
 /// ```
 ///
 /// # Panics
 ///
-/// If called outside a Spool runtime.
+/// If called outside a Spooly runtime.
 pub fn sleep_until(deadline: Instant) -> Sleep {
     let inner = context::current("sleep_until");
     Sleep::register(&inner, deadline)
@@ -73,15 +73,15 @@ pub fn sleep_until(deadline: Instant) -> Sleep {
 /// ```
 /// use std::time::Duration;
 ///
-/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// let rt = spooly::Runtime::builder().clock(spooly::MockClock::new()).build();
 /// rt.block_on(async {
-///     let mut sleep = spool::sleep(Duration::from_secs(1));
+///     let mut sleep = spooly::sleep(Duration::from_secs(1));
 ///     assert!(!sleep.is_elapsed());
 ///     // Push the deadline out, e.g. to debounce.
 ///     sleep.reset(sleep.deadline() + Duration::from_secs(1));
 ///     (&mut sleep).await;
 ///     assert!(sleep.is_elapsed());
-///     assert_eq!(spool::now().epoch_offset(), Duration::from_secs(2));
+///     assert_eq!(spooly::now().epoch_offset(), Duration::from_secs(2));
 /// });
 /// ```
 #[must_use = "futures do nothing unless you `.await` or poll them"]
@@ -149,7 +149,7 @@ impl Sleep {
     pub(crate) fn runtime(&self, what: &str) -> Rc<Inner> {
         self.inner
             .upgrade()
-            .unwrap_or_else(|| panic!("spool: `{what}` used after its runtime was dropped"))
+            .unwrap_or_else(|| panic!("spooly: `{what}` used after its runtime was dropped"))
     }
 
     fn cancel(&mut self, inner: &Inner) {
@@ -179,7 +179,7 @@ impl Future for Sleep {
                 }
                 false
             }
-            Some(_) => unreachable!("spool: a Sleep's key points at a non-sleep timer"),
+            Some(_) => unreachable!("spooly: a Sleep's key points at a non-sleep timer"),
         };
         if !fired {
             return Poll::Pending;

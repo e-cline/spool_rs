@@ -15,9 +15,9 @@ use common::{DropCounter, Gate, Trace, expect_panic, never, oneshot};
 
 const STALLED: &str = "main future stalled";
 
-fn mock() -> (spool::Runtime, spool::MockClock) {
-    let clock = spool::MockClock::new();
-    let rt = spool::Runtime::builder().clock(clock.clone()).build();
+fn mock() -> (spooly::Runtime, spooly::MockClock) {
+    let clock = spooly::MockClock::new();
+    let rt = spooly::Runtime::builder().clock(clock.clone()).build();
     (rt, clock)
 }
 
@@ -27,10 +27,10 @@ fn mock() -> (spool::Runtime, spool::MockClock) {
 fn keep_alive_lets_a_detached_task_finish_its_remote_wait() {
     let got = Rc::new(Cell::new(0));
     let g = got.clone();
-    spool::run(async move {
+    spooly::run(async move {
         let (tx, rx) = oneshot::<u32>();
-        drop(spool::spawn(async move { g.set(rx.await) }));
-        let keep = spool::keep_alive();
+        drop(spooly::spawn(async move { g.set(rx.await) }));
+        let keep = spooly::keep_alive();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(20));
             tx.send(5);
@@ -46,9 +46,9 @@ fn without_keep_alive_run_drops_the_waiting_task() {
     let counter = DropCounter::new();
     let c = counter.clone();
     let (tx, rx) = oneshot::<u32>();
-    spool::run(async move {
+    spooly::run(async move {
         let tok = c.token();
-        drop(spool::spawn(async move {
+        drop(spooly::spawn(async move {
             let _tok = tok;
             rx.await;
         }));
@@ -60,8 +60,8 @@ fn without_keep_alive_run_drops_the_waiting_task() {
 #[test]
 fn run_returns_once_the_last_guard_is_dropped() {
     let start = Instant::now();
-    spool::run(async {
-        let keep = spool::keep_alive();
+    spooly::run(async {
+        let keep = spooly::keep_alive();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(30));
             drop(keep);
@@ -73,8 +73,8 @@ fn run_returns_once_the_last_guard_is_dropped() {
 #[test]
 fn every_clone_must_be_dropped() {
     let start = Instant::now();
-    spool::run(async {
-        let a = spool::keep_alive();
+    spooly::run(async {
+        let a = spooly::keep_alive();
         let b = a.clone();
         drop(a); // `b` still holds the loop.
         thread::spawn(move || {
@@ -89,10 +89,10 @@ fn every_clone_must_be_dropped() {
 fn a_guard_dropped_on_the_loop_thread_releases_the_loop() {
     let trace = Trace::new();
     let t = trace.clone();
-    spool::run(async move {
-        let keep = spool::keep_alive();
-        drop(spool::spawn(async move {
-            spool::yield_now().await;
+    spooly::run(async move {
+        let keep = spooly::keep_alive();
+        drop(spooly::spawn(async move {
+            spooly::yield_now().await;
             t.log("task drops the guard");
             drop(keep);
         }));
@@ -102,7 +102,7 @@ fn a_guard_dropped_on_the_loop_thread_releases_the_loop() {
 
 #[test]
 fn a_guard_made_before_running() {
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     let keep = rt.keep_alive();
     let (tx, rx) = oneshot::<()>();
     let done = Rc::new(Cell::new(false));
@@ -122,7 +122,7 @@ fn a_guard_made_before_running() {
 
 #[test]
 fn block_on_ignores_keep_alive() {
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     let keep = rt.keep_alive();
     assert_eq!(rt.block_on(async { 1 }), 1);
     drop(keep);
@@ -134,9 +134,9 @@ fn keep_alive_together_with_timers() {
     let trace = Trace::new();
     let t = trace.clone();
     rt.run(async move {
-        let keep = spool::keep_alive();
+        let keep = spooly::keep_alive();
         let t2 = t.clone();
-        spool::set_timeout(Duration::from_secs(5), move || {
+        spooly::set_timeout(Duration::from_secs(5), move || {
             t2.log("timer");
             drop(keep);
         });
@@ -151,12 +151,12 @@ fn a_remote_wake_while_kept_alive_is_handled() {
     // The loop parks for the guard, but still serves remote wakes.
     let trace = Trace::new();
     let t = trace.clone();
-    spool::run(async move {
-        let keep = spool::keep_alive();
+    spooly::run(async move {
+        let keep = spooly::keep_alive();
         let (tx1, rx1) = oneshot::<u32>();
         let (tx2, rx2) = oneshot::<u32>();
         let t2 = t.clone();
-        drop(spool::spawn(async move {
+        drop(spooly::spawn(async move {
             t2.log(format!("got {}", rx1.await));
             t2.log(format!("got {}", rx2.await));
         }));
@@ -174,13 +174,13 @@ fn a_remote_wake_while_kept_alive_is_handled() {
 
 #[test]
 fn keep_alive_outside_a_runtime_panics() {
-    let msg = expect_panic(|| drop(spool::keep_alive()));
+    let msg = expect_panic(|| drop(spooly::keep_alive()));
     assert!(msg.contains("`keep_alive` called outside"), "{msg}");
 }
 
 #[test]
 fn a_guard_can_outlive_its_runtime() {
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     let keep = rt.keep_alive();
     let copy = keep.clone();
     drop(rt);
@@ -190,7 +190,7 @@ fn a_guard_can_outlive_its_runtime() {
 
 #[test]
 fn keep_alive_debug_output() {
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     let keep = rt.keep_alive();
     assert!(format!("{keep:?}").starts_with("KeepAlive"));
 }
@@ -201,8 +201,8 @@ fn a_stalled_main_waits_for_the_guard_then_panics() {
     // it is gone, the stall is reported.
     let start = Instant::now();
     let msg = expect_panic(|| {
-        spool::block_on(async {
-            let keep = spool::keep_alive();
+        spooly::block_on(async {
+            let keep = spooly::keep_alive();
             thread::spawn(move || {
                 thread::sleep(Duration::from_millis(30));
                 drop(keep);
@@ -220,19 +220,19 @@ fn a_stalled_main_waits_for_the_guard_then_panics() {
 fn main_awaiting_a_stuck_task_is_a_stall() {
     // The stuck task holds main's waker (in its JoinHandle state), but can
     // never be woken itself.
-    let msg = expect_panic(|| spool::block_on(async { spool::spawn(never()).await }));
+    let msg = expect_panic(|| spooly::block_on(async { spooly::spawn(never()).await }));
     assert!(msg.contains(STALLED), "{msg}");
-    let msg = expect_panic(|| spool::run(async { spool::spawn(never()).await }));
+    let msg = expect_panic(|| spooly::run(async { spooly::spawn(never()).await }));
     assert!(msg.contains(STALLED), "{msg}");
 }
 
 #[test]
 fn a_chain_of_stuck_tasks_is_a_stall() {
     let msg = expect_panic(|| {
-        spool::block_on(async {
-            let c = spool::spawn(never());
-            let b = spool::spawn(async move { c.await });
-            let a = spool::spawn(async move { b.await });
+        spooly::block_on(async {
+            let c = spooly::spawn(never());
+            let b = spooly::spawn(async move { c.await });
+            let a = spooly::spawn(async move { b.await });
             a.await
         })
     });
@@ -242,10 +242,10 @@ fn a_chain_of_stuck_tasks_is_a_stall() {
 #[test]
 fn every_join_flavor_is_seen_through() {
     let msg =
-        expect_panic(|| spool::block_on(async { spool::spawn(never()).try_join().await.is_ok() }));
+        expect_panic(|| spooly::block_on(async { spooly::spawn(never()).try_join().await.is_ok() }));
     assert!(msg.contains(STALLED), "try_join: {msg}");
     let msg =
-        expect_panic(|| spool::block_on(async { spool::spawn(never()).abort_on_drop().await }));
+        expect_panic(|| spooly::block_on(async { spooly::spawn(never()).abort_on_drop().await }));
     assert!(msg.contains(STALLED), "abort_on_drop: {msg}");
 }
 
@@ -254,8 +254,8 @@ fn a_task_stuck_after_a_timer_is_a_stall_once_the_timer_is_gone() {
     let (rt, clock) = mock();
     let msg = expect_panic(|| {
         rt.block_on(async {
-            spool::spawn(async {
-                spool::sleep(Duration::from_secs(3)).await;
+            spooly::spawn(async {
+                spooly::sleep(Duration::from_secs(3)).await;
                 never().await;
             })
             .await
@@ -268,11 +268,11 @@ fn a_task_stuck_after_a_timer_is_a_stall_once_the_timer_is_gone() {
 #[test]
 fn stuck_detached_tasks_dont_hide_a_stall() {
     let msg = expect_panic(|| {
-        spool::block_on(async {
+        spooly::block_on(async {
             for _ in 0..5 {
-                drop(spool::spawn(never()));
+                drop(spooly::spawn(never()));
             }
-            spool::spawn(never()).await
+            spooly::spawn(never()).await
         })
     });
     assert!(msg.contains(STALLED), "{msg}");
@@ -283,9 +283,9 @@ fn the_stalled_runtime_drops_its_stuck_tasks() {
     let counter = DropCounter::new();
     let c = counter.clone();
     let _ = expect_panic(move || {
-        spool::block_on(async move {
+        spooly::block_on(async move {
             let tok = c.token();
-            spool::spawn(async move {
+            spooly::spawn(async move {
                 let _tok = tok;
                 never().await;
             })
@@ -299,28 +299,28 @@ fn the_stalled_runtime_drops_its_stuck_tasks() {
 
 #[test]
 fn main_awaiting_a_task_that_waits_on_a_thread() {
-    let out = spool::block_on(async {
+    let out = spooly::block_on(async {
         let (tx, rx) = oneshot::<u32>();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(20));
             tx.send(9);
         });
-        spool::spawn(rx).await
+        spooly::spawn(rx).await
     });
     assert_eq!(out, 9);
 }
 
 #[test]
 fn main_awaiting_a_chain_that_ends_on_a_thread() {
-    let out = spool::block_on(async {
+    let out = spooly::block_on(async {
         let (tx, rx) = oneshot::<u32>();
-        let c = spool::spawn(rx);
-        let b = spool::spawn(async move { c.await + 1 });
+        let c = spooly::spawn(rx);
+        let b = spooly::spawn(async move { c.await + 1 });
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(20));
             tx.send(1);
         });
-        spool::spawn(async move { b.await + 1 }).await
+        spooly::spawn(async move { b.await + 1 }).await
     });
     assert_eq!(out, 3);
 }
@@ -329,11 +329,11 @@ fn main_awaiting_a_chain_that_ends_on_a_thread() {
 fn a_detached_task_on_a_thread_can_unstick_the_awaited_task() {
     // Main awaits T, which waits on a gate. Nothing about T or main is
     // remote, but a detached task D (waiting on a thread) opens the gate.
-    let out = spool::block_on(async {
+    let out = spooly::block_on(async {
         let gate = Gate::new();
         let g = gate.clone();
         let (tx, rx) = oneshot::<()>();
-        drop(spool::spawn(async move {
+        drop(spooly::spawn(async move {
             rx.await;
             gate.open();
         }));
@@ -341,7 +341,7 @@ fn a_detached_task_on_a_thread_can_unstick_the_awaited_task() {
             thread::sleep(Duration::from_millis(20));
             tx.send(());
         });
-        spool::spawn(async move {
+        spooly::spawn(async move {
             g.wait().await;
             "unstuck"
         })
@@ -353,9 +353,9 @@ fn a_detached_task_on_a_thread_can_unstick_the_awaited_task() {
 #[test]
 fn a_task_waking_main_from_a_thread() {
     // Main's own waker is sent to another thread (not through a JoinHandle).
-    let out = spool::block_on(async {
+    let out = spooly::block_on(async {
         let (tx, rx) = oneshot::<u32>();
-        let _detached = spool::spawn(never());
+        let _detached = spooly::spawn(never());
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(20));
             tx.send(4);
@@ -367,9 +367,9 @@ fn a_task_waking_main_from_a_thread() {
 
 #[test]
 fn awaiting_an_already_finished_task_is_not_a_stall() {
-    let out = spool::block_on(async {
-        let h = spool::spawn(async { 8 });
-        spool::yield_now().await;
+    let out = spooly::block_on(async {
+        let h = spooly::spawn(async { 8 });
+        spooly::yield_now().await;
         h.await
     });
     assert_eq!(out, 8);
@@ -384,9 +384,9 @@ fn run_waits_for_timers_but_not_for_stuck_tasks() {
     let c = counter.clone();
     rt.run(async move {
         let tok = c.token();
-        drop(spool::spawn(async move {
+        drop(spooly::spawn(async move {
             let _tok = tok;
-            spool::sleep(Duration::from_secs(1)).await;
+            spooly::sleep(Duration::from_secs(1)).await;
             never().await;
         }));
     });
@@ -404,10 +404,10 @@ fn run_waits_for_timers_but_not_for_stuck_tasks() {
 fn run_exits_when_only_stuck_detached_tasks_remain() {
     // Main finished; detached tasks that can't be woken don't keep `run`
     // alive (no stall panic either: main isn't pending).
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     rt.run(async {
-        let c = spool::spawn(never());
-        drop(spool::spawn(async move { c.await }));
+        let c = spooly::spawn(never());
+        drop(spooly::spawn(async move { c.await }));
     });
 }
 
@@ -415,8 +415,8 @@ fn run_exits_when_only_stuck_detached_tasks_remain() {
 fn a_cancelled_timer_does_not_keep_run_alive() {
     let (rt, clock) = mock();
     rt.run(async {
-        let h = spool::set_timeout(Duration::from_secs(10), || {});
-        spool::sleep(Duration::from_secs(1)).await;
+        let h = spooly::set_timeout(Duration::from_secs(10), || {});
+        spooly::sleep(Duration::from_secs(1)).await;
         h.cancel();
     });
     assert_eq!(clock.elapsed(), Duration::from_secs(1));

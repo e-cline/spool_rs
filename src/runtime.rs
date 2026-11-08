@@ -208,7 +208,7 @@ impl Inner {
                         }
                         // Aborted during its own poll.
                         Some(_) => Some((future, tasks.remove(id))),
-                        None => unreachable!("spool: a running task left the slab"),
+                        None => unreachable!("spooly: a running task left the slab"),
                     }
                 };
                 drop(leftover);
@@ -388,7 +388,7 @@ impl Inner {
     }
 }
 
-/// A single-threaded Spool runtime.
+/// A single-threaded Spooly runtime.
 ///
 /// Most programs can use the [`run`](crate::run) or
 /// [`block_on`](crate::block_on) free functions instead. A `Runtime` is useful
@@ -399,7 +399,7 @@ impl Inner {
 /// microtask, and timer that is still pending.
 ///
 /// ```
-/// let rt = spool::Runtime::new();
+/// let rt = spooly::Runtime::new();
 /// let handle = rt.spawn(async { 1 + 1 });
 /// assert_eq!(rt.block_on(handle), 2);
 /// ```
@@ -436,7 +436,7 @@ impl Runtime {
     /// running.
     ///
     /// ```
-    /// let rt = spool::Runtime::new();
+    /// let rt = spooly::Runtime::new();
     /// let keep = rt.keep_alive();
     /// std::thread::spawn(move || {
     ///     // ... work that will wake a task on `rt` ...
@@ -455,7 +455,7 @@ impl Runtime {
     /// ```
     /// use std::{cell::RefCell, rc::Rc};
     ///
-    /// let rt = spool::Runtime::new();
+    /// let rt = spooly::Runtime::new();
     /// let log = Rc::new(RefCell::new(Vec::new()));
     /// let l = log.clone();
     /// let task = rt.spawn(async move { l.borrow_mut().push("pre-spawned") });
@@ -489,7 +489,7 @@ impl Runtime {
     ///
     /// # Panics
     ///
-    /// - If called from inside a running Spool runtime (nested `run` /
+    /// - If called from inside a running Spooly runtime (nested `run` /
     ///   `block_on`).
     /// - If `future` stalls: it is pending, no work is queued, no timer or
     ///   `KeepAlive` exists, and nothing can ever wake it or any task. A
@@ -497,7 +497,7 @@ impl Runtime {
     ///   `future` awaits a stuck task) doesn't count; any other waker might
     ///   be woken (from another thread, say), so the loop parks instead.
     /// - If `future`, any task, or any microtask or timer callback panics.
-    ///   Spool doesn't catch panics: the panic unwinds out of `run` at once
+    ///   Spooly doesn't catch panics: the panic unwinds out of `run` at once
     ///   (or, with `panic = "abort"`, ends the program). Don't drive the
     ///   runtime again after that; drop it. See the
     ///   [crate docs](crate#panics).
@@ -505,12 +505,12 @@ impl Runtime {
     /// ```
     /// use std::{cell::Cell, rc::Rc};
     ///
-    /// let rt = spool::Runtime::new();
+    /// let rt = spooly::Runtime::new();
     /// let ran = Rc::new(Cell::new(false));
     /// let r = ran.clone();
     /// rt.run(async move {
     ///     // A detached task: `run` still waits for it, since it is queued.
-    ///     drop(spool::spawn(async move { r.set(true) }));
+    ///     drop(spooly::spawn(async move { r.set(true) }));
     /// });
     /// assert!(ran.get());
     /// ```
@@ -534,13 +534,13 @@ impl Runtime {
     /// ```
     /// use std::{cell::Cell, rc::Rc};
     ///
-    /// let rt = spool::Runtime::new();
+    /// let rt = spooly::Runtime::new();
     /// let count = Rc::new(Cell::new(0));
     /// let c = count.clone();
     /// let n = rt.block_on(async move {
     ///     let c2 = c.clone();
     ///     // Queued, but not awaited: `block_on` doesn't wait for it.
-    ///     spool::queue_microtask(move || c2.set(c2.get() + 1));
+    ///     spooly::queue_microtask(move || c2.set(c2.get() + 1));
     ///     c.get()
     /// });
     /// assert_eq!((n, count.get()), (0, 0));
@@ -562,8 +562,8 @@ impl Runtime {
 /// Configures and builds a [`Runtime`].
 ///
 /// ```
-/// let clock = spool::MockClock::new();
-/// let rt = spool::Runtime::builder().clock(clock.clone()).build();
+/// let clock = spooly::MockClock::new();
+/// let rt = spooly::Runtime::builder().clock(clock.clone()).build();
 /// assert_eq!(rt.now(), clock.now());
 /// ```
 #[derive(Default)]
@@ -639,10 +639,10 @@ impl fmt::Debug for Runtime {
 ///
 /// let log = Rc::new(RefCell::new(Vec::new()));
 /// let l = log.clone();
-/// spool::run(async move {
+/// spooly::run(async move {
 ///     let (a, b) = (l.clone(), l.clone());
-///     spool::set_timeout(Duration::ZERO, move || a.borrow_mut().push("timeout"));
-///     spool::queue_microtask(move || b.borrow_mut().push("microtask"));
+///     spooly::set_timeout(Duration::ZERO, move || a.borrow_mut().push("timeout"));
+///     spooly::queue_microtask(move || b.borrow_mut().push("microtask"));
 ///     l.borrow_mut().push("sync");
 /// });
 /// // `run` also waits for the timer, which `main` didn't await.
@@ -667,7 +667,7 @@ pub fn run<F: Future>(future: F) -> F::Output {
 ///
 /// // Futures don't need to be `Send`.
 /// let shared = Rc::new(5);
-/// let doubled = spool::block_on(async move { *shared * 2 });
+/// let doubled = spooly::block_on(async move { *shared * 2 });
 /// assert_eq!(doubled, 10);
 /// ```
 pub fn block_on<F: Future>(future: F) -> F::Output {

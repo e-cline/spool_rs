@@ -1,15 +1,15 @@
-error[E0277]: `Rc<spool::task::JoinCell<i32>>` cannot be sent between threads safely
+error[E0277]: `Rc<spooly::task::JoinCell<i32>>` cannot be sent between threads safely
  --> tests/ui/fail_join_handle_send.rs:5:28
   |
 5 |         std::thread::spawn(move || drop(handle));
   |         ------------------ -------^^^^^^^^^^^^^
   |         |                  |
-  |         |                  `Rc<spool::task::JoinCell<i32>>` cannot be sent between threads safely
+  |         |                  `Rc<spooly::task::JoinCell<i32>>` cannot be sent between threads safely
   |         |                  within this `{closure@$DIR/tests/ui/fail_join_handle_send.rs:5:28: 5:35}`
   |         required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/ui/fail_join_handle_send.rs:5:28: 5:35}`, the trait `Send` is not implemented for `Rc<spool::task::JoinCell<i32>>`
-note: required because it appears within the type `spool::JoinHandle<i32>`
+  = help: within `{closure@$DIR/tests/ui/fail_join_handle_send.rs:5:28: 5:35}`, the trait `Send` is not implemented for `Rc<spooly::task::JoinCell<i32>>`
+note: required because it appears within the type `spooly::JoinHandle<i32>`
  --> src/task.rs
   |
   | pub struct JoinHandle<T> {
@@ -28,23 +28,23 @@ note: required by a bound in `std::thread::spawn`
   |     F: Send + 'static,
   |        ^^^^ required by this bound in `spawn`
 
-error[E0277]: `std::rc::Weak<spool::runtime::Inner>` cannot be sent between threads safely
+error[E0277]: `std::rc::Weak<spooly::runtime::Inner>` cannot be sent between threads safely
  --> tests/ui/fail_join_handle_send.rs:5:28
   |
 5 |         std::thread::spawn(move || drop(handle));
   |         ------------------ -------^^^^^^^^^^^^^
   |         |                  |
-  |         |                  `std::rc::Weak<spool::runtime::Inner>` cannot be sent between threads safely
+  |         |                  `std::rc::Weak<spooly::runtime::Inner>` cannot be sent between threads safely
   |         |                  within this `{closure@$DIR/tests/ui/fail_join_handle_send.rs:5:28: 5:35}`
   |         required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/ui/fail_join_handle_send.rs:5:28: 5:35}`, the trait `Send` is not implemented for `std::rc::Weak<spool::runtime::Inner>`
+  = help: within `{closure@$DIR/tests/ui/fail_join_handle_send.rs:5:28: 5:35}`, the trait `Send` is not implemented for `std::rc::Weak<spooly::runtime::Inner>`
 note: required because it appears within the type `AbortHandle`
  --> src/task.rs
   |
   | pub struct AbortHandle {
   |            ^^^^^^^^^^^
-note: required because it appears within the type `spool::JoinHandle<i32>`
+note: required because it appears within the type `spooly::JoinHandle<i32>`
  --> src/task.rs
   |
   | pub struct JoinHandle<T> {

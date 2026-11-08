@@ -1,17 +1,17 @@
-# Spool — Design & Plan
+# Spooly — Design & Plan
 
 > Status: **Design v5.** v1 (milestones M0–M6) is implemented, and M7
-> brought it in line with v4's semantics. v4 changed direction: Spool is
+> brought it in line with v4's semantics. v4 changed direction: Spooly is
 > *inspired by* the JavaScript event loop, not a reimplementation of Node's,
 > and it targets native and WASM equally. v5 replaces the panic model with
-> one that behaves the same on every target: Spool doesn't catch panics
+> one that behaves the same on every target: Spooly doesn't catch panics
 > (§6). §11.2 and §11.3 list what v4 and v5 changed, and §12 has the
 > milestones (M8 onward is the WASM work; M8, the non-blocking core, is
 > done). Decisions are tagged `D#`; a
 > decision marked *(revised in v4)*, *(new in v4)* or *(revised in v5)*
 > says what is built so far.
 
-Spool is a small, single-threaded Rust async executor whose scheduling model
+Spooly is a small, single-threaded Rust async executor whose scheduling model
 is inspired by the JavaScript event loop: woken tasks run as FIFO microtasks,
 and timers run one at a time as macrotasks. Futures and tasks **do not need
 `Send` or `Sync`**, so you can freely use `Rc`, `RefCell`, and `Cell` inside
@@ -25,7 +25,7 @@ spawned tasks. It runs natively and in WASM (browser and WASI).
 
 - A single-threaded event loop with **simple, predictable, documented
   ordering**: the code of a macrotask → the microtask queue → timers, one
-  at a time. Spool's own spec (§3) and reference model (§8) define the order.
+  at a time. Spooly's own spec (§3) and reference model (§8) define the order.
 - **Native and WASM**: the same core runs on desktop and server OSes, in the
   browser (`wasm32-unknown-unknown`), and under WASI. The loop never blocks
   on its own; a per-target driver waits for it (D5).
@@ -35,7 +35,7 @@ spawned tasks. It runs natively and in WASM (browser and WASI).
   - timers: `sleep`, `sleep_until`, `timeout`, `set_timeout`, `set_interval`, `interval`
   - microtasks: `yield_now`, `queue_microtask`
 - **Rust-idiomatic cancellation** for everything that can be cancelled (§5).
-- **Panics behave the same on every target**: Spool never catches them,
+- **Panics behave the same on every target**: Spooly never catches them,
   so a panic anywhere stops the loop (§6). Recoverable errors are values
   (`Result`), as in synchronous Rust.
 - Zero runtime dependencies on native targets. Target-specific drivers may
@@ -48,7 +48,7 @@ spawned tasks. It runs natively and in WASM (browser and WASI).
 - **Exact parity with Node.js or browser semantics, or with JS APIs.** JS is
   the inspiration and a useful reference for readers. Where its behavior is a
   historical quirk (Node's `process.nextTick`, its 1ms timer clamp, timer
-  drift, per-duration timer lists), Spool picks what is simplest to reason
+  drift, per-duration timer lists), Spooly picks what is simplest to reason
   about and documents it.
 - Multi-threaded scheduling or work stealing.
 - Network and file I/O (future work, but the design leaves room for it).
@@ -64,13 +64,13 @@ use std::time::Duration;
 
 fn main() {
     // Runs until `main` finishes AND the loop has nothing left to do.
-    spool::run(async {
-        spool::set_timeout(Duration::from_millis(10), || println!("timeout 10ms"));
-        spool::queue_microtask(|| println!("microtask"));
+    spooly::run(async {
+        spooly::set_timeout(Duration::from_millis(10), || println!("timeout 10ms"));
+        spooly::queue_microtask(|| println!("microtask"));
         println!("sync");
 
-        let h = spool::spawn(async {
-            spool::sleep(Duration::from_millis(5)).await;
+        let h = spooly::spawn(async {
+            spooly::sleep(Duration::from_millis(5)).await;
             42
         });
         println!("joined: {}", h.await);
@@ -95,7 +95,7 @@ pub fn run<F: Future + 'static>(main: F) -> F::Output;      // native: wait for 
 pub fn block_on<F: Future>(main: F) -> F::Output;           // native: return as soon as `main` completes
                                                             // (no 'static: main lives on the stack)
 pub struct Runtime;   // Runtime::builder().clock(MockClock::new()).build().block_on(..)
-// Browser: `spool::browser::start(main)` returns at once; the loop runs from
+// Browser: `spooly::browser::start(main)` returns at once; the loop runs from
 // host callbacks (§7, M9).
 
 // ── Tasks ───────────────────────────────────────────────────────────────────
@@ -140,7 +140,7 @@ outside one, the same way `tokio::spawn` does.
 **D1. Naming** *(revised in v4)*. Names come from JS where the JS name is
 the clearest one for the concept (`set_timeout`, `set_interval`,
 `queue_microtask`), in snake_case. Borrowing a name does not promise
-identical behavior: each item documents Spool's own semantics. New APIs use
+identical behavior: each item documents Spooly's own semantics. New APIs use
 Rust names (for example a cancellation token, not `AbortController`). `yield`
 is a reserved word in Rust, so the yield function is `yield_now`. There are no
 `clear_timeout` or `clear_interval` free functions: cancelling is a method on
@@ -163,7 +163,7 @@ queued work" can usually restructure, or run it inline.
 The model is two levels, the same shape as in browsers and Node: a
 **macrotask** (main's first poll, or one timer firing) runs, and then the
 **microtask queue** drains completely before the next macrotask. The details
-below are Spool's spec; JS is the inspiration, not the reference.
+below are Spooly's spec; JS is the inspiration, not the reference.
 
 ### 3.1 Queues
 
@@ -173,14 +173,14 @@ below are Spool's spec; JS is the inspiration, not the reference.
 | **timer heap** | `set_timeout`, `set_interval`, `sleep`, `interval`, `timeout` entries | One expired timer at a time, with the microtask queue drained after each |
 
 **D3. A woken task is a microtask.** In JS, the code after an `await` resumes
-as a promise job on the microtask queue. In Spool, the matching event is a
+as a promise job on the microtask queue. In Spooly, the matching event is a
 `Waker` firing, so `wake()` puts a "poll task #N" entry on the **same FIFO
 queue** as `queue_microtask` closures:
 
 ```rust
-spool::queue_microtask(|| println!("A"));
-spool::spawn(async { println!("B"); spool::yield_now().await; println!("D"); });
-spool::queue_microtask(|| println!("C"));
+spooly::queue_microtask(|| println!("A"));
+spooly::spawn(async { println!("B"); spooly::yield_now().await; println!("D"); });
+spooly::queue_microtask(|| println!("C"));
 // prints A B C D
 ```
 
@@ -325,7 +325,7 @@ The loop is **alive** if any of these is true:
 A pending task does **not** keep the loop alive on its own: something has to
 be able to wake it.
 
-`KeepAlive` is a `Send + Sync + Clone` guard (`spool::keep_alive()`,
+`KeepAlive` is a `Send + Sync + Clone` guard (`spooly::keep_alive()`,
 `Runtime::keep_alive()`). While one exists, an idle loop parks instead of
 exiting, still serving remote wakes, and dropping the last guard unparks it.
 It is how a detached task that waits on another thread keeps `run` alive. The
@@ -352,7 +352,7 @@ still pending:
 diagnostic message:
 
 ```
-spool: main future stalled: it is pending but nothing can wake it
+spooly: main future stalled: it is pending but nothing can wake it
        (no queued work, no timers, and no outstanding wakers)
 ```
 
@@ -394,7 +394,7 @@ way out is `sleep(Duration::ZERO).await`, which yields to the timers phase.
 ### 4.1 Crate layout
 
 ```
-spool/
+spooly/
 ├── Cargo.toml          # edition 2024; no dependencies on native targets
 ├── src/
 │   ├── lib.rs          # public re-exports + free functions
@@ -526,15 +526,15 @@ As built (M4):
 
 ## 6. Panics
 
-**D11. Spool doesn't catch panics** *(revised in v5)*. A panic in `main`, in
+**D11. Spooly doesn't catch panics** *(revised in v5)*. A panic in `main`, in
 a task, in a microtask, or in a timer callback unwinds straight out of
-`run` / `block_on`, through whatever Spool frames are on the stack. With
+`run` / `block_on`, through whatever Spooly frames are on the stack. With
 `panic = "abort"` (the default on WASM) it ends the program instead. Either
 way the loop stops at the panic: nothing else runs first. A panic is never
 delivered to a `JoinHandle`, so a task has two outcomes: its output, or
 aborted.
 
-| Situation | Spool |
+| Situation | Spooly |
 |---|---|
 | A panic anywhere: `main`, a task (awaited or detached), a microtask, a timer callback | Native (`panic = "unwind"`): unwinds out of `run` / `block_on` at once. `panic = "abort"` (WASM's default): the program ends |
 | Awaiting an aborted task's `JoinHandle` | Panics with "task was aborted", an ordinary panic in the awaiting task (row above) |
@@ -550,11 +550,11 @@ Why:
 - **Rust-shaped.** Recoverable errors are values: a task that can fail
   returns a `Result`, and its joiner handles it. Code that must survive a
   panic in one piece of work can wrap that work's future in its own
-  `catch_unwind` combinator (native only, and outside Spool).
+  `catch_unwind` combinator (native only, and outside Spooly).
 
-**Unwind or abort is the application's choice, not Spool's.** The panic
+**Unwind or abort is the application's choice, not Spooly's.** The panic
 strategy belongs to the final binary (its `[profile.*] panic` setting), and
-Spool doesn't override it. An application that wants native to behave
+Spooly doesn't override it. An application that wants native to behave
 exactly like WASM sets:
 
 ```toml
@@ -562,7 +562,7 @@ exactly like WASM sets:
 panic = "abort"
 ```
 
-Spool deliberately doesn't force an abort itself (for example by calling
+Spooly deliberately doesn't force an abort itself (for example by calling
 `std::process::abort()` from a guard when a panic passes through):
 - It would add back panic-handling code that this model removed.
 - It would break tests. The Rust test harness needs unwinding: an aborting
@@ -573,18 +573,18 @@ Spool deliberately doesn't force an abort itself (for example by calling
   panics, such as a server isolating each request with `catch_unwind`, or a
   runtime on a worker thread whose panic should end only that thread.
 - An abort skips destructors (flushing buffers, removing temporary files),
-  and would also turn Spool's own panics (a stalled `main`, awaiting an
+  and would also turn Spooly's own panics (a stalled `main`, awaiting an
   aborted task) into process aborts.
 
 After a panic unwinds out of `run` / `block_on` (native only):
-- Spool's state is still memory-safe (there is no `unsafe`), and dropping
+- Spooly's state is still memory-safe (there is no `unsafe`), and dropping
   the runtime drops every remaining task, microtask, and timer as usual.
 - The panicking task's future is dropped while it unwinds, so its
   `JoinHandle` resolves as aborted.
 - **Don't drive that runtime again.** The interrupted step may have lost
   work (the panicking task's slot, or timers that the timers phase had set
   aside), so what a later `run` / `block_on` on it does is unspecified,
-  though never unsound. Spool doesn't track this (there is no poisoning);
+  though never unsound. Spooly doesn't track this (there is no poisoning);
   it is documented. Drop it, and create a new `Runtime` if needed.
 
 *(v1–v4 caught task panics, like exceptions in async JS: `handle.await`
@@ -610,7 +610,7 @@ pub trait Clock {
 Runtime::builder().clock(MockClock::new()).build()
 ```
 
-- Spool has its own `Instant` because `std::time::Instant::now()` panics on
+- Spooly has its own `Instant` because `std::time::Instant::now()` panics on
   `wasm32-unknown-unknown`.
 - `MockClock` stays frozen until something advances it. When the loop would
   otherwise wait for the next timer, it **always auto-advances** to that
@@ -636,8 +636,8 @@ Runtime::builder().clock(MockClock::new()).build()
   `PerformanceClock`, so `Runtime::new()` panics there with a message
   asking for `Builder::clock`, rather than failing inside `std`.)*
 - **D14. Browser microtasks** *(new in v4)*. The browser driver runs a
-  whole Spool step inside one host callback (a JS microtask for `Busy`, a JS
-  timeout for `WaitUntil`). Spool's microtasks are therefore ordered among
+  whole Spooly step inside one host callback (a JS microtask for `Busy`, a JS
+  timeout for `WaitUntil`). Spooly's microtasks are therefore ordered among
   themselves exactly as on native, but not interleaved one-by-one with JS
   promise jobs. That keeps the semantics identical across targets. A
   `JsFuture` awaited in a task works like any other future.
@@ -653,10 +653,10 @@ can't slip through. Runtime dependencies stay at zero. These test-only
 **dev-dependencies** are approved: `proptest`, `trybuild`, and
 `static_assertions`.
 
-**D15. The reference model is the oracle** *(revised in v4; done in M7)*. Spool's
+**D15. The reference model is the oracle** *(revised in v4; done in M7)*. Spooly's
 behavior is defined by this plan (§3) and checked against the reference model
 in `tests/model.rs`: a small, obviously-correct simulator of §3, compared
-with Spool on random programs by `proptest`. It runs everywhere, with no
+with Spooly on random programs by `proptest`. It runs everywhere, with no
 external tools and no real time. Node is no longer the definition of correct.
 *(v1 required Node in CI, and fuzzed random programs against it, skipping
 programs where Node's internal timer lists would decide the order. M7 moved
@@ -667,7 +667,7 @@ that coverage into the model, and removed the Node fuzzer.)*
 | Layer | Location | What it covers |
 |---|---|---|
 | **Unit tests** | `src/**` `#[cfg(test)]` | Slab generations, timer heap ordering and cancellation, queue drains, waker dedupe, the strong-count logic |
-| **Reference-model tests** | `tests/model.rs` | The oracle (D15). Random trees of `queue_microtask` / `set_timeout` / `set_interval` / cancel / `spawn` / `abort` / `yield_now` / `sleep` / join / panic operations, run on Spool (with a `MockClock`) and on the model; the traces must match, up to the first panic. A `Busy(ms)` operation advances the clock mid-callback, to exercise late timers and skipped interval runs. *(M7 added intervals, timer cancellation, and `Busy`; v1 covered the first two only in the Node fuzzer.)* |
+| **Reference-model tests** | `tests/model.rs` | The oracle (D15). Random trees of `queue_microtask` / `set_timeout` / `set_interval` / cancel / `spawn` / `abort` / `yield_now` / `sleep` / join / panic operations, run on Spooly (with a `MockClock`) and on the model; the traces must match, up to the first panic. A `Busy(ms)` operation advances the clock mid-callback, to exercise late timers and skipped interval runs. *(M7 added intervals, timer cancellation, and `Busy`; v1 covered the first two only in the Node fuzzer.)* |
 | **Ordering tests** | `tests/ordering.rs` | Hand-written scenarios with exact expected traces (§8.2) |
 | **Timer tests** | `tests/timers.rs` | `MockClock`-driven checks of deadlines, interval schedules and skipped ticks, timeouts, and zero durations; no real sleeps |
 | **Cancellation tests** | `tests/abort.rs` and others | Every row of the §5 table, plus edge cases (§8.3) |
@@ -679,7 +679,7 @@ that coverage into the model, and removed the Node fuzzer.)*
 | **Type-level tests** | `tests/types.rs` + `trybuild` | `!Send` futures compile; `JoinHandle`, `TimerHandle`, and `AbortHandle` are `!Send` (static assertions); misuse that should not compile doesn't |
 | **Stress tests** | `tests/stress.rs` (`#[ignore]` by default) | 1M spawned tasks, 100k timers with random cancellation, deep microtask and join chains; checks for no stack growth and roughly linear time |
 | **Doc tests** | rustdoc | Every public item has a runnable example |
-| **Node comparison** (optional) | `tests/node_parity.rs` | A handful of scenarios also run as JS in Node, as a sanity check that Spool's model is still recognizably JS-like. Opt-in with `SPOOL_COMPARE_NODE=1`; otherwise (and in CI) only the Spool half runs. A scenario where Spool deliberately differs (intervals, D7) is not compared. |
+| **Node comparison** (optional) | `tests/node_parity.rs` | A handful of scenarios also run as JS in Node, as a sanity check that Spooly's model is still recognizably JS-like. Opt-in with `SPOOLY_COMPARE_NODE=1`; otherwise (and in CI) only the Spooly half runs. A scenario where Spooly deliberately differs (intervals, D7) is not compared. |
 | **WASM** (M8–M10) | CI | `cargo check` on WASM targets; the suite under `wasm-bindgen-test` (browser) and wasmtime (WASI) |
 
 ### 8.2 Core ordering scenarios
@@ -722,7 +722,7 @@ that coverage into the model, and removed the Node fuzzer.)*
   isn't required to pass (and skips the `trybuild` comparison, whose expected
   output pins stable's wording).
 - `cargo test`, then the stress tests on a weekly schedule.
-- The optional Node comparison runs with `SPOOL_COMPARE_NODE=1`. CI doesn't
+- The optional Node comparison runs with `SPOOLY_COMPARE_NODE=1`. CI doesn't
   run it.
 - `cargo clippy -D warnings`, `cargo fmt --check`, and `cargo doc -D warnings`.
 - Coverage with `cargo-llvm-cov`: CI requires ≥ 90% of lines.
@@ -797,13 +797,13 @@ that the hot paths are the ones every target shares.
 ## 10. Open questions
 
 - **Publishing (deferred).** We haven't decided whether to publish on
-  crates.io. Until then the package is named `spool` locally, with
-  `publish = false` in `Cargo.toml`. If we do publish and `spool` is taken,
-  only the package name changes (for example `spool-rt`); the library can stay
-  `spool` through `[lib] name`.
+  crates.io. Until then the package is named `spooly` locally, with
+  `publish = false` in `Cargo.toml`. If we do publish and `spooly` is taken,
+  only the package name changes (for example `spooly-rt`); the library can stay
+  `spooly` through `[lib] name`.
 - **Public `step()` (decided in M8: internal for now).** The step function
   could be public so embedders (a game loop, a GUI event loop) can drive
-  Spool themselves, but that commits to the `Step` type and its semantics.
+  Spooly themselves, but that commits to the `Step` type and its semantics.
   It stays `pub(crate)` until the browser driver (M9) has tried that shape
   and someone needs it; making it public later doesn't break anything.
 - **Browser bindings (decide in M9).** `wasm-bindgen` + `js-sys` is the
@@ -845,7 +845,7 @@ that the hot paths are the ones every target shares.
 | Correctness oracle | Real Node, required in CI, plus a Node fuzzer | The reference model (D15); a small optional Node comparison |
 | Loop structure | One blocking `drive()` | A non-blocking `step()` plus per-target drivers (D5) |
 | Default clock | Always `SystemClock` | Per target (D13) |
-| Naming | snake_case JS names | JS names where clearest, with Spool's own documented semantics; Rust names for new APIs (D1) |
+| Naming | snake_case JS names | JS names where clearest, with Spooly's own documented semantics; Rust names for new APIs (D1) |
 | `set_immediate` | Future work, with a check phase | Dropped; a "yield to timers" helper may replace it (§9.3) |
 | JS-specific extras (`AbortController`, `unhandledRejection`) | Future work, JS-shaped | Rust-shaped equivalents, judged on merit (§9.3) |
 
@@ -858,7 +858,7 @@ that the hot paths are the ones every target shares.
 | After a panic escapes | The runtime is poisoned | Not tracked; don't drive it again (§6) |
 | `JoinError` | `enum { Panicked(payload), Aborted }` | An opaque struct: the task was aborted |
 | Targets | Different panic behaviour natively and on WASM | The same model everywhere (§6) |
-| Unwind vs abort | Required unwinding for the model to work | The application's `panic` setting decides; Spool never forces an abort (§6) |
+| Unwind vs abort | Required unwinding for the model to work | The application's `panic` setting decides; Spooly never forces an abort (§6) |
 
 ---
 
@@ -873,7 +873,7 @@ that the hot paths are the ones every target shares.
 | M4 | Cancellation & panics | done | `abort`, `AbortHandle`, `abort_on_drop`, `try_join`, the v1 panic model and poisoning (replaced in M7.5) |
 | M5 | Liveness & threads | done | `KeepAlive`, stall-detection hardening, remote wakes, the Node fuzzer |
 | M6 | Polish | done | Rustdoc guide, examples, stress tests, benchmarks (§9.6 baseline), coverage gate |
-| M7 | Realign with v4 | done | Remove `next_tick` and the tick queue (D12), from the API, the model, tests, docs, and examples. New interval semantics (D7) for `set_interval` and `interval()`, with model and timer tests for skipped ticks. Extend the reference model with intervals and timer cancellation (D15), then remove the Node fuzzer; trim `node_parity` to the optional comparison and drop `SPOOL_REQUIRE_NODE` and the Node install from CI. Reword the crate docs, README, and examples from "matches Node" to "inspired by JS". Update the "§8.2 scenario N" references in the tests to the v4 numbering. |
+| M7 | Realign with v4 | done | Remove `next_tick` and the tick queue (D12), from the API, the model, tests, docs, and examples. New interval semantics (D7) for `set_interval` and `interval()`, with model and timer tests for skipped ticks. Extend the reference model with intervals and timer cancellation (D15), then remove the Node fuzzer; trim `node_parity` to the optional comparison and drop `SPOOLY_REQUIRE_NODE` and the Node install from CI. Reword the crate docs, README, and examples from "matches Node" to "inspired by JS". Update the "§8.2 scenario N" references in the tests to the v4 numbering. |
 | M7.5 | Simpler panics (v5) | done | Remove `catch_unwind`, the panicked join state, unobserved-panic re-raising, and poisoning (D11). `JoinError` becomes an opaque "aborted" struct. Rewrite the panic tests, the model's panic handling, the docs, and the `panics` example for the new model. |
 | M8 | Non-blocking core | done | Split `drive()` into `step()` (D5) and a native driver; make main a resumable task; per-target default clock (D13); `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1` in CI. Settle the public-`step()` question (§10). No behavior change on native: the full suite must pass unchanged. |
 | M9 | Browser | | Feature `browser`: `PerformanceClock`, the host-callback driver (D14), `browser::start`, an example page, and the suite (minus threads and panics) under `wasm-bindgen-test` in a headless browser in CI. |

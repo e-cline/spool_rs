@@ -37,7 +37,7 @@ pub(crate) fn enter(inner: &Rc<Inner>) -> EnterGuard {
         let mut slot = c.borrow_mut();
         assert!(
             slot.is_none(),
-            "spool: cannot start a runtime from inside a running Spool runtime \
+            "spooly: cannot start a runtime from inside a running Spooly runtime \
              (nested `block_on` / `run` is not supported)"
         );
         *slot = Some(Rc::clone(inner));
@@ -56,11 +56,11 @@ pub(crate) fn enter_for_teardown(inner: &Rc<Inner>) -> EnterGuard {
 ///
 /// # Panics
 ///
-/// If called outside a Spool runtime. `what` names the API for the message.
+/// If called outside a Spooly runtime. `what` names the API for the message.
 pub(crate) fn current(what: &str) -> Rc<Inner> {
     CURRENT
         .with(|c| c.borrow().clone())
-        .unwrap_or_else(|| panic!("spool: `{what}` called outside of a Spool runtime"))
+        .unwrap_or_else(|| panic!("spooly: `{what}` called outside of a Spooly runtime"))
 }
 
 /// Queues `id` on the current runtime if it is the runtime `runtime_id`.

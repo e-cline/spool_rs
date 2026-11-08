@@ -34,9 +34,9 @@ impl Rng {
     }
 }
 
-fn mock() -> spool::Runtime {
-    spool::Runtime::builder()
-        .clock(spool::MockClock::new())
+fn mock() -> spooly::Runtime {
+    spooly::Runtime::builder()
+        .clock(spooly::MockClock::new())
         .build()
 }
 
@@ -52,10 +52,10 @@ fn a_million_spawned_tasks() {
     const N: usize = 1_000_000;
     let done = Rc::new(Cell::new(0));
     let d = done.clone();
-    spool::run(async move {
+    spooly::run(async move {
         for _ in 0..N {
             let d = d.clone();
-            drop(spool::spawn(async move { d.set(d.get() + 1) }));
+            drop(spooly::spawn(async move { d.set(d.get() + 1) }));
         }
     });
     assert_eq!(done.get(), N);
@@ -65,8 +65,8 @@ fn a_million_spawned_tasks() {
 #[ignore = "stress test"]
 fn a_million_joined_tasks() {
     const N: u64 = 1_000_000;
-    let sum = spool::block_on(async {
-        let handles: Vec<_> = (0..N).map(|i| spool::spawn(async move { i })).collect();
+    let sum = spooly::block_on(async {
+        let handles: Vec<_> = (0..N).map(|i| spooly::spawn(async move { i })).collect();
         let mut sum = 0;
         for h in handles {
             sum += h.await;
@@ -83,13 +83,13 @@ fn many_tasks_yielding_many_times() {
     const YIELDS: usize = 100;
     let polls = Rc::new(Cell::new(0));
     let p = polls.clone();
-    spool::run(async move {
+    spooly::run(async move {
         for _ in 0..TASKS {
             let p = p.clone();
-            drop(spool::spawn(async move {
+            drop(spooly::spawn(async move {
                 for _ in 0..YIELDS {
                     p.set(p.get() + 1);
-                    spool::yield_now().await;
+                    spooly::yield_now().await;
                 }
             }));
         }
@@ -111,7 +111,7 @@ fn a_hundred_thousand_timers_with_random_cancellation() {
         for i in 0..N {
             let ms = rng.below(10_000);
             let f = fired.clone();
-            handles.push(spool::set_timeout(Duration::from_millis(ms), move || {
+            handles.push(spooly::set_timeout(Duration::from_millis(ms), move || {
                 f.borrow_mut().push((ms, i));
             }));
         }
@@ -140,7 +140,7 @@ fn timers_cancelled_while_their_phase_runs() {
     // had already reached them.
     const N: usize = 50_000;
     let rt = mock();
-    let handles: Rc<RefCell<Vec<spool::TimerHandle>>> = Rc::default();
+    let handles: Rc<RefCell<Vec<spooly::TimerHandle>>> = Rc::default();
     let fired = Rc::new(Cell::new(0));
     let cancelled_before_firing = Rc::new(Cell::new(0));
     rt.run(async {
@@ -152,7 +152,7 @@ fn timers_cancelled_while_their_phase_runs() {
                 rng.clone(),
                 cancelled_before_firing.clone(),
             );
-            let h = spool::set_timeout(Duration::from_millis(5), move || {
+            let h = spooly::set_timeout(Duration::from_millis(5), move || {
                 fired.set(fired.get() + 1);
                 let victim = rng.borrow_mut().below(N as u64) as usize;
                 let victim = all.borrow()[victim].clone();
@@ -179,7 +179,7 @@ fn ten_thousand_intervals() {
             let total = total.clone();
             let mut n = 0;
             let period = Duration::from_millis(1 + (i % 7) as u64);
-            spool::set_interval(period, move |me| {
+            spooly::set_interval(period, move |me| {
                 total.set(total.get() + 1);
                 n += 1;
                 if n == TICKS {
@@ -199,15 +199,15 @@ fn two_interleaved_million_microtask_chains() {
     fn chain(left: usize, count: Rc<Cell<usize>>) {
         count.set(count.get() + 1);
         if left > 0 {
-            spool::queue_microtask(move || chain(left - 1, count));
+            spooly::queue_microtask(move || chain(left - 1, count));
         }
     }
     let a = Rc::new(Cell::new(0));
     let b = Rc::new(Cell::new(0));
     let (ca, cb) = (a.clone(), b.clone());
-    spool::run(async move {
-        spool::queue_microtask(move || chain(N - 1, ca));
-        spool::queue_microtask(move || chain(N - 1, cb));
+    spooly::run(async move {
+        spooly::queue_microtask(move || chain(N - 1, ca));
+        spooly::queue_microtask(move || chain(N - 1, cb));
     });
     assert_eq!((a.get(), b.get()), (N, N));
 }
@@ -218,11 +218,11 @@ fn a_hundred_thousand_deep_join_chain() {
     // Task i awaits task i - 1. Completion ripples through the chain one
     // microtask at a time, never recursively.
     const N: u64 = 100_000;
-    let out = spool::block_on(async {
-        let mut prev = spool::spawn(async { 0_u64 });
+    let out = spooly::block_on(async {
+        let mut prev = spooly::spawn(async { 0_u64 });
         for _ in 0..N {
             let p = prev;
-            prev = spool::spawn(async move { p.await + 1 });
+            prev = spooly::spawn(async move { p.await + 1 });
         }
         prev.await
     });
@@ -235,17 +235,17 @@ fn a_hundred_thousand_aborts() {
     const N: usize = 100_000;
     let dropped = common::DropCounter::new();
     let d = dropped.clone();
-    spool::block_on(async move {
+    spooly::block_on(async move {
         let handles: Vec<_> = (0..N)
             .map(|_| {
                 let tok = d.token();
-                spool::spawn(async move {
+                spooly::spawn(async move {
                     let _tok = tok;
                     std::future::pending::<()>().await;
                 })
             })
             .collect();
-        spool::yield_now().await; // Every task is now pending.
+        spooly::yield_now().await; // Every task is now pending.
         for h in &handles {
             h.abort();
         }
@@ -260,13 +260,13 @@ fn heavy_cross_thread_waking() {
     const THREADS: usize = 8;
     const PER_THREAD: usize = 10_000;
     let received = Arc::new(AtomicUsize::new(0));
-    let sum = spool::block_on(async {
+    let sum = spooly::block_on(async {
         let mut handles = Vec::new();
         let mut senders = Vec::new();
         for _ in 0..THREADS * PER_THREAD {
             let (tx, rx) = common::oneshot::<usize>();
             senders.push(tx);
-            handles.push(spool::spawn(rx));
+            handles.push(spooly::spawn(rx));
         }
         let mut workers = Vec::new();
         let mut senders = senders.into_iter();
@@ -302,9 +302,9 @@ fn time_grows_roughly_linearly() {
         let rt = mock();
         rt.run(async move {
             for i in 0..n {
-                drop(spool::spawn(async move {
-                    spool::yield_now().await;
-                    spool::sleep(Duration::from_millis((i % 100) as u64)).await;
+                drop(spooly::spawn(async move {
+                    spooly::yield_now().await;
+                    spooly::sleep(Duration::from_millis((i % 100) as u64)).await;
                 }));
             }
         });

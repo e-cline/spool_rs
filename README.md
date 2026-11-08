@@ -1,6 +1,6 @@
-# spool_rs
+# spooly
 
-**Spool** is a lightweight, single-threaded Rust async executor, with a
+**Spooly** is a lightweight, single-threaded Rust async executor, with a
 scheduling model inspired by the JavaScript event loop. It targets native
 platforms and WASM (browser and WASI support are in progress).
 
@@ -10,20 +10,20 @@ WARNING: This is an experiment. Nothing here is not intended for production use.
 - Simple, predictable ordering: a woken task is queued as a microtask, in
   FIFO order, like the code after an `await` in JS. Timers run one at a
   time, and the microtask queue drains after each.
-- Panics behave the same everywhere: Spool never catches them, so a panic
+- Panics behave the same everywhere: Spooly never catches them, so a panic
   stops the loop. Errors a caller should handle are `Result` values.
 - Zero runtime dependencies, no `unsafe`.
 
 ```rust
 use std::time::Duration;
 
-spool::run(async {
-    spool::set_timeout(Duration::from_millis(40), || println!("timeout 40ms"));
-    spool::queue_microtask(|| println!("microtask"));
+spooly::run(async {
+    spooly::set_timeout(Duration::from_millis(40), || println!("timeout 40ms"));
+    spooly::queue_microtask(|| println!("microtask"));
     println!("sync");
 
-    let task = spool::spawn(async {
-        spool::sleep(Duration::from_millis(10)).await;
+    let task = spooly::spawn(async {
+        spooly::sleep(Duration::from_millis(10)).await;
         42
     });
     println!("joined: {}", task.await);
@@ -31,7 +31,7 @@ spool::run(async {
 // Prints: sync, microtask, joined: 42, timeout 40ms
 ```
 
-Spool borrows JS names where they're the clearest ones (`set_timeout`,
+Spooly borrows JS names where they're the clearest ones (`set_timeout`,
 `queue_microtask`), but it is not a reimplementation of Node or the browser:
 the design ([`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md)) defines its
 semantics.
@@ -39,7 +39,7 @@ semantics.
 > **Status:** early development. Done: M0–M6 (the core loop, microtasks,
 > timers, cancellation, liveness and threads, and polish), M7 (realigning
 > with design v4: no `next_tick`, intervals that don't drift, and a
-> reference model as the test oracle), and M7.5 (design v5: Spool no longer
+> reference model as the test oracle), and M7.5 (design v5: Spooly no longer
 > catches panics, so they behave the same natively and on WASM), and M8 (a
 > non-blocking core: the loop is a `step()` that a per-target driver calls,
 > and the crate builds for `wasm32-unknown-unknown` and `wasm32-wasip1`).
@@ -70,15 +70,15 @@ cargo +nightly miri test   # needs: rustup +nightly component add miri
 
 `tests/model.rs` is the oracle: it generates random programs (microtasks,
 timers, intervals, cancellation, slow callbacks, tasks, aborts, panics), runs
-each on Spool and on a small reference simulator of the design, and requires
+each on Spooly and on a small reference simulator of the design, and requires
 identical traces.
 
 `tests/node_parity.rs` also runs a handful of scenarios as JS in Node, as an
-optional sanity check that Spool still behaves like a JS event loop. It needs
+optional sanity check that Spooly still behaves like a JS event loop. It needs
 `node` on `PATH`:
 
 ```sh
-SPOOL_COMPARE_NODE=1 cargo test --test node_parity
+SPOOLY_COMPARE_NODE=1 cargo test --test node_parity
 ```
 
 Stress tests (a million tasks, 100k timers with random cancellation, very

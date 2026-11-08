@@ -3,11 +3,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 fn main() {
-    spool::block_on(async {
+    spooly::block_on(async {
         let shared = Rc::new(RefCell::new(0));
         let s = shared.clone();
-        let handle = spool::spawn(async move {
-            spool::yield_now().await;
+        let handle = spooly::spawn(async move {
+            spooly::yield_now().await;
             *s.borrow_mut() += 1;
             s
         });

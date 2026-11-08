@@ -21,15 +21,15 @@ use crate::clock::Instant;
 ///
 /// # Panics
 ///
-/// If `period` is zero, or if called outside a Spool runtime.
+/// If `period` is zero, or if called outside a Spooly runtime.
 ///
 /// ```
 /// use std::time::Duration;
 ///
-/// let clock = spool::MockClock::new();
-/// let rt = spool::Runtime::builder().clock(clock.clone()).build();
+/// let clock = spooly::MockClock::new();
+/// let rt = spooly::Runtime::builder().clock(clock.clone()).build();
 /// rt.block_on(async {
-///     let mut every_second = spool::interval(Duration::from_secs(1));
+///     let mut every_second = spooly::interval(Duration::from_secs(1));
 ///     let start = every_second.tick().await; // Immediately.
 ///     every_second.tick().await;
 ///     let third = every_second.tick().await;
@@ -39,7 +39,7 @@ use crate::clock::Instant;
 pub fn interval(period: Duration) -> Interval {
     assert!(
         !period.is_zero(),
-        "spool: `interval` period must be non-zero"
+        "spooly: `interval` period must be non-zero"
     );
     Interval {
         sleep: sleep(period),
@@ -58,19 +58,19 @@ pub fn interval(period: Duration) -> Interval {
 /// ```
 /// use std::time::Duration;
 ///
-/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// let rt = spooly::Runtime::builder().clock(spooly::MockClock::new()).build();
 /// rt.block_on(async {
-///     let mut every_10s = spool::interval(Duration::from_secs(10));
+///     let mut every_10s = spooly::interval(Duration::from_secs(10));
 ///     assert_eq!(every_10s.period(), Duration::from_secs(10));
 ///     every_10s.tick().await; // The first tick is immediate.
 ///     let mut ticks = 0;
 ///     // Wait up to 3s at a time: the dropped `tick` futures lose nothing.
 ///     while ticks < 2 {
-///         if spool::timeout(Duration::from_secs(3), every_10s.tick()).await.is_ok() {
+///         if spooly::timeout(Duration::from_secs(3), every_10s.tick()).await.is_ok() {
 ///             ticks += 1;
 ///         }
 ///     }
-///     assert_eq!(spool::now().epoch_offset(), Duration::from_secs(20));
+///     assert_eq!(spooly::now().epoch_offset(), Duration::from_secs(20));
 /// });
 /// ```
 #[derive(Debug)]

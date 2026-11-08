@@ -1,7 +1,7 @@
 //! The microtask queue, and its public API.
 //!
 //! In JS, the code after an `await` resumes as a promise job on the microtask
-//! queue. In Spool, the matching event is a task's `Waker` firing, so a woken
+//! queue. In Spooly, the matching event is a task's `Waker` firing, so a woken
 //! task is queued on the microtask queue as a [`Microtask::Poll`], in the same
 //! FIFO order as [`queue_microtask`] callbacks (design decision D3).
 
@@ -83,7 +83,7 @@ impl<T> Queue<T> {
 ///
 /// # Panics
 ///
-/// If called outside a Spool runtime. A panic inside `callback` unwinds out of
+/// If called outside a Spooly runtime. A panic inside `callback` unwinds out of
 /// `run` / `block_on`.
 ///
 /// # Example
@@ -93,9 +93,9 @@ impl<T> Queue<T> {
 ///
 /// let log = Rc::new(RefCell::new(Vec::new()));
 /// let l = log.clone();
-/// spool::run(async move {
+/// spooly::run(async move {
 ///     let l2 = l.clone();
-///     spool::queue_microtask(move || l2.borrow_mut().push("microtask"));
+///     spooly::queue_microtask(move || l2.borrow_mut().push("microtask"));
 ///     l.borrow_mut().push("sync");
 /// });
 /// assert_eq!(*log.borrow(), ["sync", "microtask"]);

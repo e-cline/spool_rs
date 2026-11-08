@@ -283,9 +283,9 @@ impl TimerQueue {
 ///
 /// let fired = Rc::new(Cell::new(false));
 /// let f = fired.clone();
-/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// let rt = spooly::Runtime::builder().clock(spooly::MockClock::new()).build();
 /// rt.run(async move {
-///     let handle = spool::set_timeout(Duration::from_secs(1), move || f.set(true));
+///     let handle = spooly::set_timeout(Duration::from_secs(1), move || f.set(true));
 ///     assert!(handle.is_active());
 ///     handle.cancel(); // Like `clearTimeout(handle)`.
 ///     assert!(!handle.is_active());
@@ -344,7 +344,7 @@ impl fmt::Debug for TimerHandle {
 ///
 /// # Panics
 ///
-/// If called outside a Spool runtime. A panic in `callback` unwinds out of
+/// If called outside a Spooly runtime. A panic in `callback` unwinds out of
 /// `run` / `block_on`.
 ///
 /// # Example
@@ -354,14 +354,14 @@ impl fmt::Debug for TimerHandle {
 ///
 /// // A MockClock keeps the example deterministic: on the real clock, time
 /// // passes between the calls below, which matters on a very slow machine.
-/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// let rt = spooly::Runtime::builder().clock(spooly::MockClock::new()).build();
 /// let log = Rc::new(RefCell::new(Vec::new()));
 /// let l = log.clone();
 /// rt.run(async move {
 ///     let (a, b) = (l.clone(), l.clone());
-///     spool::set_timeout(Duration::from_millis(20), move || a.borrow_mut().push("20ms"));
-///     spool::set_timeout(Duration::from_millis(10), move || b.borrow_mut().push("10ms"));
-///     let cancelled = spool::set_timeout(Duration::from_millis(5), || unreachable!());
+///     spooly::set_timeout(Duration::from_millis(20), move || a.borrow_mut().push("20ms"));
+///     spooly::set_timeout(Duration::from_millis(10), move || b.borrow_mut().push("10ms"));
+///     let cancelled = spooly::set_timeout(Duration::from_millis(5), || unreachable!());
 ///     cancelled.cancel();
 /// });
 /// assert_eq!(*log.borrow(), ["10ms", "20ms"]);
@@ -388,7 +388,7 @@ pub fn set_timeout(delay: Duration, callback: impl FnOnce() + 'static) -> TimerH
 ///
 /// # Panics
 ///
-/// If `period` is zero, or if called outside a Spool runtime. A panic in
+/// If `period` is zero, or if called outside a Spooly runtime. A panic in
 /// `callback` unwinds out of `run` / `block_on`.
 ///
 /// # Example
@@ -398,8 +398,8 @@ pub fn set_timeout(delay: Duration, callback: impl FnOnce() + 'static) -> TimerH
 ///
 /// let ticks = Rc::new(Cell::new(0));
 /// let t = ticks.clone();
-/// spool::run(async move {
-///     spool::set_interval(Duration::from_millis(10), move |handle| {
+/// spooly::run(async move {
+///     spooly::set_interval(Duration::from_millis(10), move |handle| {
 ///         t.set(t.get() + 1);
 ///         if t.get() == 3 {
 ///             handle.cancel();
@@ -411,7 +411,7 @@ pub fn set_timeout(delay: Duration, callback: impl FnOnce() + 'static) -> TimerH
 pub fn set_interval(period: Duration, callback: impl FnMut(&TimerHandle) + 'static) -> TimerHandle {
     assert!(
         !period.is_zero(),
-        "spool: `set_interval` period must be non-zero"
+        "spooly: `set_interval` period must be non-zero"
     );
     let inner = context::current("set_interval");
     let deadline = inner.now().saturating_add(period);

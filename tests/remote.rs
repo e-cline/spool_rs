@@ -16,16 +16,16 @@ fn another_thread_wakes_main() {
         thread::sleep(Duration::from_millis(20));
         tx.send(7);
     });
-    let out = spool::block_on(rx);
+    let out = spooly::block_on(rx);
     assert_eq!(out, 7);
     worker.join().unwrap();
 }
 
 #[test]
 fn another_thread_wakes_a_spawned_task() {
-    let out = spool::block_on(async {
+    let out = spooly::block_on(async {
         let (tx, rx) = oneshot();
-        let task = spool::spawn(async move { rx.await * 2 });
+        let task = spooly::spawn(async move { rx.await * 2 });
         let worker = thread::spawn(move || {
             thread::sleep(Duration::from_millis(10));
             tx.send(21);
@@ -40,13 +40,13 @@ fn another_thread_wakes_a_spawned_task() {
 #[test]
 fn many_threads_wake_many_tasks() {
     const N: usize = 32;
-    let out = spool::block_on(async {
+    let out = spooly::block_on(async {
         let mut handles = Vec::new();
         let mut workers = Vec::new();
         let barrier = Arc::new(Barrier::new(N));
         for i in 0..N {
             let (tx, rx) = oneshot();
-            handles.push(spool::spawn(rx));
+            handles.push(spooly::spawn(rx));
             let b = barrier.clone();
             workers.push(thread::spawn(move || {
                 b.wait();
@@ -72,7 +72,7 @@ fn remote_wake_before_the_loop_parks() {
     for _ in 0..200 {
         let (tx, rx) = oneshot();
         let worker = thread::spawn(move || tx.send(()));
-        spool::block_on(rx);
+        spooly::block_on(rx);
         worker.join().unwrap();
     }
 }
@@ -80,9 +80,9 @@ fn remote_wake_before_the_loop_parks() {
 #[test]
 fn remote_wake_after_task_finished_is_ignored() {
     let stash: Arc<Mutex<Option<Waker>>> = Arc::default();
-    spool::block_on(async {
+    spooly::block_on(async {
         let s = stash.clone();
-        spool::spawn(std::future::poll_fn(move |cx| {
+        spooly::spawn(std::future::poll_fn(move |cx| {
             *s.lock().unwrap() = Some(cx.waker().clone());
             Poll::Ready(())
         }))
@@ -90,7 +90,7 @@ fn remote_wake_after_task_finished_is_ignored() {
         let w = stash.lock().unwrap().take().unwrap();
         thread::spawn(move || w.wake()).join().unwrap();
         // The stale id is absorbed and ignored.
-        spool::yield_now().await;
+        spooly::yield_now().await;
     });
 }
 
@@ -98,13 +98,13 @@ fn remote_wake_after_task_finished_is_ignored() {
 fn remote_wake_after_runtime_dropped_is_ignored() {
     let stash: Arc<Mutex<Option<Waker>>> = Arc::default();
     {
-        let rt = spool::Runtime::new();
+        let rt = spooly::Runtime::new();
         let s = stash.clone();
         drop(rt.spawn(std::future::poll_fn(move |cx| {
             *s.lock().unwrap() = Some(cx.waker().clone());
             Poll::<()>::Pending
         })));
-        rt.block_on(spool::yield_now());
+        rt.block_on(spooly::yield_now());
     }
     let w = stash.lock().unwrap().take().unwrap();
     thread::spawn(move || w.wake()).join().unwrap();
@@ -114,7 +114,7 @@ fn remote_wake_after_runtime_dropped_is_ignored() {
 fn waker_woken_on_runtime_thread_while_not_running() {
     // A waker from a runtime that isn't currently running, woken on its own
     // thread, takes the remote path and is delivered on the next block_on.
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     let stash: std::rc::Rc<std::cell::RefCell<Option<Waker>>> = Default::default();
     let s = stash.clone();
     let mut woken = false;
@@ -127,7 +127,7 @@ fn waker_woken_on_runtime_thread_while_not_running() {
             Poll::Pending
         }
     }));
-    rt.block_on(spool::yield_now());
+    rt.block_on(spooly::yield_now());
     stash.borrow_mut().take().unwrap().wake();
     assert_eq!(rt.block_on(h), 3);
 }
@@ -137,8 +137,8 @@ fn a_remote_wake_interrupts_a_timer_wait() {
     // The loop is parked until a far-off timer; the remote wake must cut the
     // park short.
     let start = std::time::Instant::now();
-    let out = spool::block_on(async {
-        let _far = spool::set_timeout(Duration::from_secs(30), || {});
+    let out = spooly::block_on(async {
+        let _far = spooly::set_timeout(Duration::from_secs(30), || {});
         let (tx, rx) = oneshot();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(20));
@@ -159,7 +159,7 @@ fn remote_wakes_queued_while_idle_run_in_wake_order() {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     let log: Rc<RefCell<Vec<usize>>> = Rc::default();
     let wakers: Arc<Mutex<Vec<Option<Waker>>>> = Arc::new(Mutex::new(vec![None, None, None]));
     let mut handles = Vec::new();
@@ -177,7 +177,7 @@ fn remote_wakes_queued_while_idle_run_in_wake_order() {
             }
         })));
     }
-    rt.block_on(spool::yield_now());
+    rt.block_on(spooly::yield_now());
     // Wake 2, 0, 1 from another thread while the runtime isn't running.
     let w = wakers.clone();
     thread::spawn(move || {
@@ -218,9 +218,9 @@ fn racing_remote_and_local_wakes_are_deduplicated() {
             }
         }));
     }
-    let polls = spool::block_on(async {
+    let polls = spooly::block_on(async {
         let s = stash.clone();
-        spool::spawn(async move {
+        spooly::spawn(async move {
             let mut polls = 0;
             std::future::poll_fn(|cx| {
                 polls += 1;
@@ -262,7 +262,7 @@ fn many_threads_wake_main_repeatedly() {
         }));
     }
     drop(tx);
-    let received = spool::block_on(std::future::poll_fn(|cx| {
+    let received = spooly::block_on(std::future::poll_fn(|cx| {
         // Register first, then drain, so that no send is missed.
         *stash.lock().unwrap() = Some(cx.waker().clone());
         let mut n = 0;
@@ -295,9 +295,9 @@ fn a_keep_alive_dropped_while_parked_on_a_timer() {
     // The unpark from the guard's drop is a spurious wake for a loop that is
     // waiting on a timer: it just goes back to waiting.
     let start = std::time::Instant::now();
-    spool::run(async {
-        let keep = spool::keep_alive();
-        spool::set_timeout(Duration::from_millis(40), || {});
+    spooly::run(async {
+        let keep = spooly::keep_alive();
+        spooly::set_timeout(Duration::from_millis(40), || {});
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(10));
             drop(keep);
@@ -309,7 +309,7 @@ fn a_keep_alive_dropped_while_parked_on_a_timer() {
 #[test]
 fn waker_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>(_: &T) {}
-    spool::block_on(std::future::poll_fn(|cx| {
+    spooly::block_on(std::future::poll_fn(|cx| {
         assert_send_sync(cx.waker());
         Poll::Ready(())
     }));

@@ -34,9 +34,9 @@ use crate::waker::Shared;
 /// let slot: Arc<Mutex<(Option<u32>, Option<Waker>)>> = Arc::default();
 /// let got = Rc::new(Cell::new(0));
 /// let (reader, g) = (slot.clone(), got.clone());
-/// spool::run(async move {
+/// spooly::run(async move {
 ///     // A detached task, waiting on the slot.
-///     drop(spool::spawn(async move {
+///     drop(spooly::spawn(async move {
 ///         let value = std::future::poll_fn(|cx| {
 ///             let mut s = reader.lock().unwrap();
 ///             match s.0.take() {
@@ -50,7 +50,7 @@ use crate::waker::Shared;
 ///         .await;
 ///         g.set(value);
 ///     }));
-///     let keep = spool::keep_alive();
+///     let keep = spooly::keep_alive();
 ///     std::thread::spawn(move || {
 ///         let waker = {
 ///             let mut s = slot.lock().unwrap();
@@ -103,15 +103,15 @@ impl fmt::Debug for KeepAlive {
 /// [`KeepAlive`] for a full example.
 ///
 /// ```
-/// spool::run(async {
-///     let keep = spool::keep_alive();
+/// spooly::run(async {
+///     let keep = spooly::keep_alive();
 ///     std::thread::spawn(move || drop(keep)); // `run` waits for this drop.
 /// });
 /// ```
 ///
 /// # Panics
 ///
-/// If called outside a Spool runtime. Use
+/// If called outside a Spooly runtime. Use
 /// [`Runtime::keep_alive`](crate::Runtime::keep_alive) to create one before
 /// the runtime is running.
 pub fn keep_alive() -> KeepAlive {

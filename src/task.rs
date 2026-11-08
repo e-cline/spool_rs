@@ -62,7 +62,7 @@ impl<T> JoinCell<T> {
         let previous = std::mem::replace(&mut *self.state.borrow_mut(), new);
         match previous {
             JoinState::Pending { waker } => waker,
-            _ => unreachable!("spool: task resolved twice"),
+            _ => unreachable!("spooly: task resolved twice"),
         }
     }
 
@@ -171,7 +171,7 @@ where
 ///   Use [`try_join`](Self::try_join) to get an `Err` instead.
 /// - Polling the handle again after it returned panics.
 ///
-/// A panic *inside* the task is not delivered here: Spool doesn't catch
+/// A panic *inside* the task is not delivered here: Spooly doesn't catch
 /// panics, so it unwinds out of `run` / `block_on` (see the
 /// [crate docs](crate#panics)). A task that can fail should return a
 /// `Result`.
@@ -179,8 +179,8 @@ where
 /// # Example
 ///
 /// ```
-/// let answer = spool::block_on(async {
-///     let handle = spool::spawn(async { 6 * 7 });
+/// let answer = spooly::block_on(async {
+///     let handle = spooly::spawn(async { 6 * 7 });
 ///     handle.await
 /// });
 /// assert_eq!(answer, 42);
@@ -196,10 +196,10 @@ impl<T> JoinHandle<T> {
     /// Returns `true` if the task has finished: it completed or was aborted.
     ///
     /// ```
-    /// spool::block_on(async {
-    ///     let handle = spool::spawn(async {});
+    /// spooly::block_on(async {
+    ///     let handle = spooly::spawn(async {});
     ///     assert!(!handle.is_finished());
-    ///     spool::yield_now().await;
+    ///     spooly::yield_now().await;
     ///     assert!(handle.is_finished());
     /// });
     /// ```
@@ -210,8 +210,8 @@ impl<T> JoinHandle<T> {
     /// Cancels the task. See [`AbortHandle::abort`].
     ///
     /// ```
-    /// spool::block_on(async {
-    ///     let task = spool::spawn(std::future::pending::<()>());
+    /// spooly::block_on(async {
+    ///     let task = spooly::spawn(std::future::pending::<()>());
     ///     task.abort();
     ///     assert!(task.try_join().await.is_err());
     /// });
@@ -232,12 +232,12 @@ impl<T> JoinHandle<T> {
     /// ```
     /// use std::{cell::Cell, rc::Rc};
     ///
-    /// spool::block_on(async {
+    /// spooly::block_on(async {
     ///     let ran = Rc::new(Cell::new(false));
     ///     let r = ran.clone();
-    ///     let task = spool::spawn(async move { r.set(true) }).abort_on_drop();
+    ///     let task = spooly::spawn(async move { r.set(true) }).abort_on_drop();
     ///     drop(task); // Aborted before it ever ran.
-    ///     spool::yield_now().await;
+    ///     spooly::yield_now().await;
     ///     assert!(!ran.get());
     /// });
     /// ```
@@ -250,8 +250,8 @@ impl<T> JoinHandle<T> {
     /// `Err(JoinError)` instead.
     ///
     /// ```
-    /// spool::block_on(async {
-    ///     let handle = spool::spawn(std::future::pending::<()>());
+    /// spooly::block_on(async {
+    ///     let handle = spooly::spawn(std::future::pending::<()>());
     ///     handle.abort();
     ///     let err = handle.try_join().await.unwrap_err();
     ///     assert_eq!(err.to_string(), "task was aborted");
@@ -271,7 +271,7 @@ impl<T> JoinHandle<T> {
                 }
                 Poll::Pending
             }
-            JoinState::Consumed => panic!("spool: `JoinHandle` polled after it completed"),
+            JoinState::Consumed => panic!("spooly: `JoinHandle` polled after it completed"),
             _ => match std::mem::replace(&mut *state, JoinState::Consumed) {
                 JoinState::Ready(output) => Poll::Ready(Ok(output)),
                 JoinState::Aborted => Poll::Ready(Err(JoinError(()))),
@@ -289,7 +289,7 @@ impl<T> Future for JoinHandle<T> {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(output)) => Poll::Ready(output),
             Poll::Ready(Err(_)) => {
-                panic!("spool: task was aborted (use `try_join` to handle this)")
+                panic!("spooly: task was aborted (use `try_join` to handle this)")
             }
         }
     }
@@ -333,17 +333,17 @@ impl<T> fmt::Debug for JoinHandle<T> {
 /// ```
 /// use std::time::Duration;
 ///
-/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// let rt = spooly::Runtime::builder().clock(spooly::MockClock::new()).build();
 /// rt.block_on(async {
-///     let worker = spool::spawn(async {
-///         spool::sleep(Duration::from_secs(60)).await;
+///     let worker = spooly::spawn(async {
+///         spooly::sleep(Duration::from_secs(60)).await;
 ///         "finished"
 ///     });
 ///     // A watchdog that cancels the worker after 5s.
 ///     let abort = worker.abort_handle();
-///     spool::set_timeout(Duration::from_secs(5), move || abort.abort());
+///     spooly::set_timeout(Duration::from_secs(5), move || abort.abort());
 ///     assert!(worker.try_join().await.is_err());
-///     assert_eq!(spool::now().epoch_offset(), Duration::from_secs(5));
+///     assert_eq!(spooly::now().epoch_offset(), Duration::from_secs(5));
 /// });
 /// ```
 #[derive(Clone)]
@@ -396,24 +396,24 @@ impl fmt::Debug for AbortHandle {
 /// ```
 /// use std::{cell::Cell, rc::Rc};
 ///
-/// spool::block_on(async {
+/// spooly::block_on(async {
 ///     let beats = Rc::new(Cell::new(0));
 ///     {
 ///         let b = beats.clone();
 ///         // A heartbeat that lives exactly as long as this scope.
-///         let _heartbeat = spool::spawn(async move {
+///         let _heartbeat = spooly::spawn(async move {
 ///             loop {
 ///                 b.set(b.get() + 1);
-///                 spool::yield_now().await;
+///                 spooly::yield_now().await;
 ///             }
 ///         })
 ///         .abort_on_drop();
 ///         for _ in 0..3 {
-///             spool::yield_now().await;
+///             spooly::yield_now().await;
 ///         }
 ///     }
 ///     let seen = beats.get();
-///     spool::yield_now().await;
+///     spooly::yield_now().await;
 ///     assert_eq!(beats.get(), seen, "aborted at the end of the scope");
 /// });
 /// ```
@@ -466,10 +466,10 @@ impl<T> fmt::Debug for AbortOnDrop<T> {
 /// [`JoinError`] if it was aborted.
 ///
 /// ```
-/// spool::block_on(async {
-///     let ok = spool::spawn(async { 1 }).try_join().await;
+/// spooly::block_on(async {
+///     let ok = spooly::spawn(async { 1 }).try_join().await;
 ///     assert_eq!(ok.unwrap(), 1);
-///     let tj = spool::spawn(std::future::pending::<i32>()).try_join();
+///     let tj = spooly::spawn(std::future::pending::<i32>()).try_join();
 ///     tj.abort();
 ///     assert!(tj.is_finished());
 ///     assert!(tj.await.is_err());
@@ -516,8 +516,8 @@ impl<T> fmt::Debug for TryJoin<T> {
 /// more causes can be added later.
 ///
 /// ```
-/// spool::block_on(async {
-///     let task = spool::spawn(std::future::pending::<()>());
+/// spooly::block_on(async {
+///     let task = spooly::spawn(std::future::pending::<()>());
 ///     task.abort();
 ///     let err = task.try_join().await.unwrap_err();
 ///     assert_eq!(err.to_string(), "task was aborted");
@@ -548,17 +548,17 @@ impl std::error::Error for JoinError {}
 ///
 /// # Panics
 ///
-/// If called outside a Spool runtime.
+/// If called outside a Spooly runtime.
 ///
 /// # Example
 ///
 /// ```
 /// use std::{cell::RefCell, rc::Rc};
 ///
-/// spool::block_on(async {
+/// spooly::block_on(async {
 ///     let log = Rc::new(RefCell::new(Vec::new()));
 ///     let l = log.clone();
-///     let handle = spool::spawn(async move { l.borrow_mut().push("task") });
+///     let handle = spooly::spawn(async move { l.borrow_mut().push("task") });
 ///     log.borrow_mut().push("main");
 ///     handle.await;
 ///     assert_eq!(*log.borrow(), ["main", "task"]);

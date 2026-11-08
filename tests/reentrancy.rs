@@ -11,8 +11,8 @@ use common::{DropCounter, OnDrop, Trace};
 
 #[test]
 fn spawn_during_poll() {
-    let out = spool::block_on(async {
-        let hs: Vec<_> = (0..10).map(|i| spool::spawn(async move { i })).collect();
+    let out = spooly::block_on(async {
+        let hs: Vec<_> = (0..10).map(|i| spooly::spawn(async move { i })).collect();
         let mut sum = 0;
         for h in hs {
             sum += h.await;
@@ -26,10 +26,10 @@ fn spawn_during_poll() {
 fn wake_another_task_during_poll() {
     let trace = Trace::new();
     let t = trace.clone();
-    spool::block_on(async move {
+    spooly::block_on(async move {
         let stash: Rc<RefCell<Option<Waker>>> = Rc::default();
         let (s1, t1) = (stash.clone(), t.clone());
-        let sleeper = spool::spawn(std::future::poll_fn(move |cx| {
+        let sleeper = spooly::spawn(std::future::poll_fn(move |cx| {
             if s1.borrow().is_some() {
                 *s1.borrow_mut() = Some(cx.waker().clone());
                 t1.log("sleeper parked");
@@ -40,7 +40,7 @@ fn wake_another_task_during_poll() {
             }
         }));
         *stash.borrow_mut() = Some(Waker::noop().clone());
-        spool::yield_now().await; // Sleeper parks.
+        spooly::yield_now().await; // Sleeper parks.
         let w = stash.borrow_mut().take().unwrap();
         w.wake(); // Wake it from main's poll.
         sleeper.await;
@@ -52,18 +52,18 @@ fn wake_another_task_during_poll() {
 fn drop_of_completed_future_spawns_a_task() {
     let trace = Trace::new();
     let t = trace.clone();
-    spool::block_on(async move {
+    spooly::block_on(async move {
         let t1 = t.clone();
-        let h = spool::spawn(async move {
+        let h = spooly::spawn(async move {
             let t2 = t1.clone();
             let _guard = OnDrop(move || {
                 let t3 = t2.clone();
-                drop(spool::spawn(async move { t3.log("spawned from drop") }));
+                drop(spooly::spawn(async move { t3.log("spawned from drop") }));
             });
             t1.log("task body");
         });
         h.await;
-        spool::yield_now().await;
+        spooly::yield_now().await;
     });
     trace.assert(&["task body", "spawned from drop"]);
 }
@@ -72,7 +72,7 @@ fn drop_of_completed_future_spawns_a_task() {
 fn drop_during_teardown_can_spawn() {
     let trace = Trace::new();
     let t = trace.clone();
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     let counter = DropCounter::new();
     let token = counter.token();
     drop(rt.spawn(async move {
@@ -80,7 +80,7 @@ fn drop_during_teardown_can_spawn() {
             // Spawn during teardown: allowed, the task is dropped unrun.
             let tok = DropCounter::new().token();
             let t2 = t.clone();
-            drop(spool::spawn(async move {
+            drop(spooly::spawn(async move {
                 let _tok = tok;
                 t2.log("must not run");
             }));
@@ -88,7 +88,7 @@ fn drop_during_teardown_can_spawn() {
         let _token = token;
         common::never().await;
     }));
-    rt.block_on(spool::yield_now());
+    rt.block_on(spooly::yield_now());
     drop(rt);
     assert_eq!(counter.count(), 1, "pending task dropped exactly once");
     trace.assert(&[]);
@@ -96,7 +96,7 @@ fn drop_during_teardown_can_spawn() {
 
 #[test]
 fn drop_during_teardown_can_wake_tasks() {
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     let stash: Rc<RefCell<Option<Waker>>> = Rc::default();
     let s = stash.clone();
     drop(rt.spawn(std::future::poll_fn(move |cx| {
@@ -113,8 +113,8 @@ fn drop_during_teardown_can_wake_tasks() {
         common::never().await;
     }));
     rt.block_on(async {
-        spool::yield_now().await;
-        spool::yield_now().await;
+        spooly::yield_now().await;
+        spooly::yield_now().await;
     });
     drop(rt); // Must not panic or loop forever.
     drop(stash);
@@ -122,8 +122,8 @@ fn drop_during_teardown_can_wake_tasks() {
 
 #[test]
 fn runtime_dropped_inside_another_runtimes_task() {
-    let out = spool::block_on(async {
-        let inner = spool::Runtime::new();
+    let out = spooly::block_on(async {
+        let inner = spooly::Runtime::new();
         let counter = DropCounter::new();
         let tok = counter.token();
         drop(inner.spawn(async move {
@@ -133,7 +133,7 @@ fn runtime_dropped_inside_another_runtimes_task() {
         drop(inner); // Teardown while another runtime is current.
         assert_eq!(counter.count(), 1);
         // The outer runtime is still current and works.
-        spool::spawn(async { 5 }).await
+        spooly::spawn(async { 5 }).await
     });
     assert_eq!(out, 5);
 }
@@ -145,25 +145,25 @@ fn spawn_inside_the_output_drop_of_a_detached_task() {
     impl Drop for SpawnOnDrop {
         fn drop(&mut self) {
             let t = self.0.clone();
-            drop(spool::spawn(async move { t.log("from output drop") }));
+            drop(spooly::spawn(async move { t.log("from output drop") }));
         }
     }
     let trace = Trace::new();
     let t = trace.clone();
-    spool::block_on(async move {
-        drop(spool::spawn(async move { SpawnOnDrop(t) }));
-        spool::yield_now().await;
-        spool::yield_now().await;
+    spooly::block_on(async move {
+        drop(spooly::spawn(async move { SpawnOnDrop(t) }));
+        spooly::yield_now().await;
+        spooly::yield_now().await;
     });
     trace.assert(&["from output drop"]);
 }
 
 #[test]
 fn waker_woken_after_task_finished_is_harmless() {
-    spool::block_on(async {
+    spooly::block_on(async {
         let stash: Rc<RefCell<Option<Waker>>> = Rc::default();
         let s = stash.clone();
-        spool::spawn(std::future::poll_fn(move |cx| {
+        spooly::spawn(std::future::poll_fn(move |cx| {
             *s.borrow_mut() = Some(cx.waker().clone());
             Poll::Ready(())
         }))
@@ -172,7 +172,7 @@ fn waker_woken_after_task_finished_is_harmless() {
         // The slot may be reused; the stale wake must not poll the new task.
         let counter = Rc::new(std::cell::Cell::new(0));
         let c = counter.clone();
-        let h = spool::spawn(std::future::poll_fn(move |_| {
+        let h = spooly::spawn(std::future::poll_fn(move |_| {
             c.set(c.get() + 1);
             if c.get() >= 2 {
                 Poll::Ready(())
@@ -180,10 +180,10 @@ fn waker_woken_after_task_finished_is_harmless() {
                 Poll::Pending
             }
         }));
-        spool::yield_now().await; // First poll: pending, no wake registered.
+        spooly::yield_now().await; // First poll: pending, no wake registered.
         w.wake_by_ref();
         w.wake();
-        spool::yield_now().await;
+        spooly::yield_now().await;
         assert_eq!(counter.get(), 1, "stale wakes must not poll the new task");
         drop(h);
     });

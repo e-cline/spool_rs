@@ -1,14 +1,14 @@
-error[E0277]: `Rc<spool::runtime::Inner>` cannot be sent between threads safely
+error[E0277]: `Rc<spooly::runtime::Inner>` cannot be sent between threads safely
  --> tests/ui/fail_runtime_send.rs:4:24
   |
 4 |     std::thread::spawn(move || rt.block_on(async {}));
   |     ------------------ -------^^^^^^^^^^^^^^^^^^^^^^
   |     |                  |
-  |     |                  `Rc<spool::runtime::Inner>` cannot be sent between threads safely
+  |     |                  `Rc<spooly::runtime::Inner>` cannot be sent between threads safely
   |     |                  within this `{closure@$DIR/tests/ui/fail_runtime_send.rs:4:24: 4:31}`
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/ui/fail_runtime_send.rs:4:24: 4:31}`, the trait `Send` is not implemented for `Rc<spool::runtime::Inner>`
+  = help: within `{closure@$DIR/tests/ui/fail_runtime_send.rs:4:24: 4:31}`, the trait `Send` is not implemented for `Rc<spooly::runtime::Inner>`
 note: required because it appears within the type `Runtime`
  --> src/runtime.rs
   |

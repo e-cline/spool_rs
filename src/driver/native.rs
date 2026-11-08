@@ -9,7 +9,7 @@ use crate::driver::MainTask;
 use crate::park;
 use crate::runtime::{Inner, Main, Step};
 
-const STALL_MESSAGE: &str = "spool: main future stalled: it is pending but nothing can wake it \
+const STALL_MESSAGE: &str = "spooly: main future stalled: it is pending but nothing can wake it \
      (no queued work, no timers, no `KeepAlive` guards, and no wakers outside the runtime; \
      every pending task is stuck too)";
 

@@ -1,6 +1,6 @@
-//! Time: Spool's own [`Instant`], the [`Clock`] trait, and the two clocks.
+//! Time: Spooly's own [`Instant`], the [`Clock`] trait, and the two clocks.
 //!
-//! Spool has its own `Instant` instead of using `std::time::Instant`, because
+//! Spooly has its own `Instant` instead of using `std::time::Instant`, because
 //! `std`'s panics on `wasm32-unknown-unknown`. In the browser, a future clock
 //! will read `performance.now()` through the same [`Clock`] trait.
 
@@ -23,7 +23,7 @@ use crate::context;
 ///
 /// ```
 /// use std::time::Duration;
-/// use spool::Instant;
+/// use spooly::Instant;
 ///
 /// let a = Instant::from_epoch_offset(Duration::from_millis(250));
 /// let b = a + Duration::from_millis(750);
@@ -58,7 +58,7 @@ impl Instant {
     /// `self`.
     pub fn duration_since(self, earlier: Instant) -> Duration {
         self.checked_duration_since(earlier)
-            .expect("spool: `earlier` is later than `self`")
+            .expect("spooly: `earlier` is later than `self`")
     }
 
     /// The time from `earlier` to `self`, or `None` if `earlier` is later.
@@ -91,7 +91,7 @@ impl Instant {
     ///
     /// # Panics
     ///
-    /// If called outside a Spool runtime.
+    /// If called outside a Spooly runtime.
     pub fn elapsed(self) -> Duration {
         now().saturating_duration_since(self)
     }
@@ -107,7 +107,7 @@ impl Add<Duration> for Instant {
     type Output = Instant;
     fn add(self, d: Duration) -> Instant {
         self.checked_add(d)
-            .expect("spool: overflow when adding a duration to an instant")
+            .expect("spooly: overflow when adding a duration to an instant")
     }
 }
 
@@ -121,7 +121,7 @@ impl Sub<Duration> for Instant {
     type Output = Instant;
     fn sub(self, d: Duration) -> Instant {
         self.checked_sub(d)
-            .expect("spool: overflow when subtracting a duration from an instant")
+            .expect("spooly: overflow when subtracting a duration from an instant")
     }
 }
 
@@ -140,7 +140,7 @@ impl Sub<Instant> for Instant {
 
 /// A source of time for a runtime.
 ///
-/// Spool ships with [`SystemClock`] (the default natively and on WASI) and
+/// Spooly ships with [`SystemClock`] (the default natively and on WASI) and
 /// [`MockClock`] (for tests). Pass a clock to [`Builder::clock`](crate::Builder::clock).
 ///
 /// A custom clock only needs [`now`](Clock::now). When the runtime is idle
@@ -151,7 +151,7 @@ impl Sub<Instant> for Instant {
 ///
 /// ```
 /// use std::time::Duration;
-/// use spool::{Clock, Instant, SystemClock};
+/// use spooly::{Clock, Instant, SystemClock};
 ///
 /// const HOUR: Duration = Duration::from_secs(3600);
 ///
@@ -163,12 +163,12 @@ impl Sub<Instant> for Instant {
 ///     }
 /// }
 ///
-/// let rt = spool::Runtime::builder()
+/// let rt = spooly::Runtime::builder()
 ///     .clock(StartedAnHourAgo(SystemClock::new()))
 ///     .build();
 /// let start = rt.now();
 /// assert!(start.epoch_offset() >= HOUR);
-/// rt.block_on(async { spool::sleep(Duration::from_millis(10)).await });
+/// rt.block_on(async { spooly::sleep(Duration::from_millis(10)).await });
 /// assert!(rt.now() - start >= Duration::from_millis(10));
 /// ```
 pub trait Clock {
@@ -191,9 +191,9 @@ pub trait Clock {
 /// ```
 /// use std::time::Duration;
 ///
-/// let rt = spool::Runtime::builder().clock(spool::SystemClock::new()).build();
+/// let rt = spooly::Runtime::builder().clock(spooly::SystemClock::new()).build();
 /// let start = rt.now();
-/// rt.block_on(async { spool::sleep(Duration::from_millis(10)).await });
+/// rt.block_on(async { spooly::sleep(Duration::from_millis(10)).await });
 /// assert!(rt.now() - start >= Duration::from_millis(10));
 /// ```
 #[derive(Debug, Clone, Copy)]
@@ -233,7 +233,7 @@ pub(crate) fn default_clock() -> Rc<dyn Clock> {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
         panic!(
-            "spool: wasm32-unknown-unknown has no default clock; \
+            "spooly: wasm32-unknown-unknown has no default clock; \
              pass one with `Runtime::builder().clock(...)`"
         )
     }
@@ -254,10 +254,10 @@ pub(crate) fn default_clock() -> Rc<dyn Clock> {
 /// ```
 /// use std::time::Duration;
 ///
-/// let clock = spool::MockClock::new();
-/// let rt = spool::Runtime::builder().clock(clock.clone()).build();
+/// let clock = spooly::MockClock::new();
+/// let rt = spooly::Runtime::builder().clock(clock.clone()).build();
 /// rt.run(async {
-///     spool::sleep(Duration::from_secs(3600)).await; // Returns instantly.
+///     spooly::sleep(Duration::from_secs(3600)).await; // Returns instantly.
 /// });
 /// assert_eq!(clock.elapsed(), Duration::from_secs(3600));
 /// ```
@@ -288,10 +288,10 @@ impl MockClock {
     /// ```
     /// use std::time::Duration;
     ///
-    /// let clock = spool::MockClock::new();
-    /// let rt = spool::Runtime::builder().clock(clock.clone()).build();
+    /// let clock = spooly::MockClock::new();
+    /// let rt = spooly::Runtime::builder().clock(clock.clone()).build();
     /// let fired = rt.block_on(async {
-    ///     let sleep = spool::sleep(Duration::from_secs(5));
+    ///     let sleep = spooly::sleep(Duration::from_secs(5));
     ///     clock.advance(Duration::from_secs(5));
     ///     // Due now: completes in the next timers phase, with no jump.
     ///     sleep.await;
@@ -308,7 +308,7 @@ impl MockClock {
             self.now
                 .get()
                 .checked_add(d)
-                .expect("spool: MockClock overflow"),
+                .expect("spooly: MockClock overflow"),
         );
     }
 }
@@ -339,17 +339,17 @@ impl Clock for MockClock {
 /// ```
 /// use std::time::Duration;
 ///
-/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// let rt = spooly::Runtime::builder().clock(spooly::MockClock::new()).build();
 /// rt.block_on(async {
-///     let start = spool::now();
-///     spool::sleep(Duration::from_millis(30)).await;
-///     assert_eq!(spool::now() - start, Duration::from_millis(30));
+///     let start = spooly::now();
+///     spooly::sleep(Duration::from_millis(30)).await;
+///     assert_eq!(spooly::now() - start, Duration::from_millis(30));
 /// });
 /// ```
 ///
 /// # Panics
 ///
-/// If called outside a Spool runtime.
+/// If called outside a Spooly runtime.
 pub fn now() -> Instant {
     context::current("now").now()
 }

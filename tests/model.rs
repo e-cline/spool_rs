@@ -1,14 +1,14 @@
 //! Reference-model tests: `proptest` generates random scheduling programs,
-//! and each one is run (a) on Spool and (b) on a tiny, obviously-correct
+//! and each one is run (a) on Spooly and (b) on a tiny, obviously-correct
 //! simulator of the event-loop semantics in plan §3. The traces must match.
-//! The model is Spool's correctness oracle (plan D15).
+//! The model is Spooly's correctness oracle (plan D15).
 //!
 //! Programs mix microtasks, one-shot timers, intervals, timer cancellation,
 //! slow callbacks (which move the clock forward), spawned tasks, yields,
-//! sleeps, joins, aborts, and panics. Spool runs them on a `MockClock`, and
+//! sleeps, joins, aborts, and panics. Spooly runs them on a `MockClock`, and
 //! the model keeps its own virtual time, so timers are deterministic.
 //!
-//! Spool doesn't catch panics (plan §6): any panic crashes the run at
+//! Spooly doesn't catch panics (plan §6): any panic crashes the run at
 //! once, and the traces must match up to the crash.
 
 use std::cell::RefCell;
@@ -171,7 +171,7 @@ fn program_strategy() -> impl Strategy<Value = Body> {
     })
 }
 
-// ── Running on Spool ────────────────────────────────────────────────────────
+// ── Running on Spooly ────────────────────────────────────────────────────────
 
 type Log = Rc<RefCell<Vec<u32>>>;
 
@@ -180,9 +180,9 @@ type Log = Rc<RefCell<Vec<u32>>>;
 #[derive(Clone)]
 struct Ctx {
     log: Log,
-    clock: spool::MockClock,
-    tasks: Rc<RefCell<HashMap<u32, spool::AbortHandle>>>,
-    timers: Rc<RefCell<HashMap<u32, spool::TimerHandle>>>,
+    clock: spooly::MockClock,
+    tasks: Rc<RefCell<HashMap<u32, spooly::AbortHandle>>>,
+    timers: Rc<RefCell<HashMap<u32, spooly::TimerHandle>>>,
 }
 
 const MODEL_PANIC: &str = "model panic";
@@ -207,24 +207,24 @@ fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
-fn spool_ops(ops: &[Op], ctx: &Ctx) {
+fn spooly_ops(ops: &[Op], ctx: &Ctx) {
     for op in ops {
         match op {
             Op::Log(id) => ctx.log.borrow_mut().push(*id),
             Op::Micro(ops) => {
                 let (ops, ctx) = (ops.clone(), ctx.clone());
-                spool::queue_microtask(move || spool_ops(&ops, &ctx));
+                spooly::queue_microtask(move || spooly_ops(&ops, &ctx));
             }
             Op::Timer(slot, delay, ops) => {
                 let (ops, c) = (ops.clone(), ctx.clone());
-                let handle = spool::set_timeout(ms(*delay), move || spool_ops(&ops, &c));
+                let handle = spooly::set_timeout(ms(*delay), move || spooly_ops(&ops, &c));
                 ctx.timers.borrow_mut().insert(*slot, handle);
             }
             Op::Interval(slot, period, runs, ops) => {
                 let (ops, c) = (ops.clone(), ctx.clone());
                 let mut left = *runs;
-                let handle = spool::set_interval(ms(*period), move |me| {
-                    spool_ops(&ops, &c);
+                let handle = spooly::set_interval(ms(*period), move |me| {
+                    spooly_ops(&ops, &c);
                     left -= 1;
                     if left == 0 {
                         me.cancel();
@@ -240,7 +240,7 @@ fn spool_ops(ops: &[Op], ctx: &Ctx) {
             }
             Op::Busy(n) => ctx.clock.advance(ms(*n)),
             Op::Spawn(slot, body) => {
-                let handle = spool::spawn(spool_body(body.clone(), ctx.clone()));
+                let handle = spooly::spawn(spooly_body(body.clone(), ctx.clone()));
                 ctx.tasks.borrow_mut().insert(*slot, handle.abort_handle());
                 drop(handle); // Detached.
             }
@@ -254,21 +254,21 @@ fn spool_ops(ops: &[Op], ctx: &Ctx) {
     }
 }
 
-fn spool_body(body: Body, ctx: Ctx) -> Pin<Box<dyn Future<Output = ()>>> {
+fn spooly_body(body: Body, ctx: Ctx) -> Pin<Box<dyn Future<Output = ()>>> {
     Box::pin(async move {
         for step in body.0.iter() {
             match step {
-                Step::Ops(ops) => spool_ops(ops, &ctx),
-                Step::Yield => spool::yield_now().await,
-                Step::Sleep(delay) => spool::sleep(ms(*delay)).await,
+                Step::Ops(ops) => spooly_ops(ops, &ctx),
+                Step::Yield => spooly::yield_now().await,
+                Step::Sleep(delay) => spooly::sleep(ms(*delay)).await,
                 Step::SleepUntilPast(back) => {
-                    let deadline = spool::now()
+                    let deadline = spooly::now()
                         .checked_sub(ms(*back))
-                        .unwrap_or(spool::Instant::ZERO);
-                    spool::sleep_until(deadline).await;
+                        .unwrap_or(spooly::Instant::ZERO);
+                    spooly::sleep_until(deadline).await;
                 }
                 Step::Join(child) => {
-                    let child = spool::spawn(spool_body(child.clone(), ctx.clone()));
+                    let child = spooly::spawn(spooly_body(child.clone(), ctx.clone()));
                     // `Err` only if the child was aborted.
                     let _ = child.try_join().await;
                 }
@@ -278,18 +278,18 @@ fn spool_body(body: Body, ctx: Ctx) -> Pin<Box<dyn Future<Output = ()>>> {
     })
 }
 
-fn run_on_spool(program: &Body) -> Outcome {
+fn run_on_spooly(program: &Body) -> Outcome {
     quiet_model_panics();
-    let clock = spool::MockClock::new();
+    let clock = spooly::MockClock::new();
     let ctx = Ctx {
         log: Log::default(),
         clock: clock.clone(),
         tasks: Rc::default(),
         timers: Rc::default(),
     };
-    let rt = spool::Runtime::builder().clock(clock).build();
+    let rt = spooly::Runtime::builder().clock(clock).build();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rt.run(spool_body(program.clone(), ctx.clone()));
+        rt.run(spooly_body(program.clone(), ctx.clone()));
     }));
     if let Err(payload) = &result {
         assert_eq!(
@@ -628,9 +628,9 @@ proptest! {
     })]
 
     #[test]
-    fn spool_matches_the_reference_model(program in program_strategy()) {
+    fn spooly_matches_the_reference_model(program in program_strategy()) {
         let expected = Model::run(&program);
-        let actual = run_on_spool(&program);
+        let actual = run_on_spooly(&program);
         prop_assert_eq!(actual, expected);
     }
 }
@@ -650,7 +650,7 @@ mod model_sanity {
     fn check_outcome(program: &Body, expected: &[u32], crashed: bool) {
         let expected = (expected.to_vec(), crashed);
         assert_eq!(Model::run(program), expected, "model");
-        assert_eq!(run_on_spool(program), expected, "spool");
+        assert_eq!(run_on_spooly(program), expected, "spooly");
     }
 
     #[test]

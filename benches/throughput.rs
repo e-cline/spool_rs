@@ -73,9 +73,9 @@ impl Bench {
     }
 }
 
-fn mock() -> spool::Runtime {
-    spool::Runtime::builder()
-        .clock(spool::MockClock::new())
+fn mock() -> spooly::Runtime {
+    spooly::Runtime::builder()
+        .clock(spooly::MockClock::new())
         .build()
 }
 
@@ -119,21 +119,21 @@ fn main() {
     // --- Spawning ---------------------------------------------------------
 
     b.run("spawn/detached", 1_000_000, |n| {
-        let rt = spool::Runtime::new();
+        let rt = spooly::Runtime::new();
         rt.block_on(async {
             for i in 0..n {
-                drop(spool::spawn(async move {
+                drop(spooly::spawn(async move {
                     black_box(i);
                 }));
             }
-            spool::yield_now().await;
+            spooly::yield_now().await;
         });
     });
 
     b.run("spawn/join", 1_000_000, |n| {
-        let rt = spool::Runtime::new();
+        let rt = spooly::Runtime::new();
         rt.block_on(async {
-            let handles: Vec<_> = (0..n).map(|i| spool::spawn(async move { i })).collect();
+            let handles: Vec<_> = (0..n).map(|i| spooly::spawn(async move { i })).collect();
             for h in handles {
                 black_box(h.await);
             }
@@ -142,27 +142,27 @@ fn main() {
 
     b.run("spawn/block_on (new runtime each)", 100_000, |n| {
         for i in 0..n {
-            black_box(spool::block_on(async move { i }));
+            black_box(spooly::block_on(async move { i }));
         }
     });
 
     // --- Waking -----------------------------------------------------------
 
     b.run("wake/yield_now (one task)", 1_000_000, |n| {
-        spool::Runtime::new().block_on(async {
+        spooly::Runtime::new().block_on(async {
             for _ in 0..n {
-                spool::yield_now().await;
+                spooly::yield_now().await;
             }
         });
     });
 
     b.run("wake/yield_now (1k tasks)", 1_000_000, |n| {
-        spool::Runtime::new().block_on(async {
+        spooly::Runtime::new().block_on(async {
             let handles: Vec<_> = (0..1_000)
                 .map(|_| {
-                    spool::spawn(async move {
+                    spooly::spawn(async move {
                         for _ in 0..n / 1_000 {
-                            spool::yield_now().await;
+                            spooly::yield_now().await;
                         }
                     })
                 })
@@ -174,10 +174,10 @@ fn main() {
     });
 
     b.run("wake/remote (from another thread)", 100_000, |n| {
-        spool::Runtime::new().block_on(async {
+        spooly::Runtime::new().block_on(async {
             let flags: Vec<Flag> = (0..n).map(|_| Flag::default()).collect();
-            let handles: Vec<_> = flags.iter().cloned().map(spool::spawn).collect();
-            spool::yield_now().await; // Every task is now waiting on its flag.
+            let handles: Vec<_> = flags.iter().cloned().map(spooly::spawn).collect();
+            spooly::yield_now().await; // Every task is now waiting on its flag.
             let setter = std::thread::spawn(move || flags.iter().for_each(Flag::set));
             for h in handles {
                 h.await;
@@ -190,12 +190,12 @@ fn main() {
 
     b.run("queue/queue_microtask", 1_000_000, |n| {
         let count = Rc::new(Cell::new(0));
-        spool::Runtime::new().block_on(async {
+        spooly::Runtime::new().block_on(async {
             for _ in 0..n {
                 let count = count.clone();
-                spool::queue_microtask(move || count.set(count.get() + 1));
+                spooly::queue_microtask(move || count.set(count.get() + 1));
             }
-            spool::yield_now().await;
+            spooly::yield_now().await;
         });
         assert_eq!(count.get(), n);
     });
@@ -208,7 +208,7 @@ fn main() {
             for i in 0..n {
                 let count = count.clone();
                 let delay = Duration::from_millis((i % 1_000) as u64);
-                spool::set_timeout(delay, move || count.set(count.get() + 1));
+                spooly::set_timeout(delay, move || count.set(count.get() + 1));
             }
         });
         assert_eq!(count.get(), n);
@@ -218,7 +218,7 @@ fn main() {
         mock().run(async {
             for i in 0..n {
                 let delay = Duration::from_millis((i % 1_000) as u64);
-                spool::set_timeout(delay, || unreachable!()).cancel();
+                spooly::set_timeout(delay, || unreachable!()).cancel();
             }
         });
     });
@@ -226,9 +226,9 @@ fn main() {
     b.run("timer/sleep (1k tasks)", 1_000_000, |n| {
         mock().run(async {
             for t in 0..1_000_u64 {
-                drop(spool::spawn(async move {
+                drop(spooly::spawn(async move {
                     for _ in 0..n / 1_000 {
-                        spool::sleep(Duration::from_millis(1 + t % 10)).await;
+                        spooly::sleep(Duration::from_millis(1 + t % 10)).await;
                     }
                 }));
             }
@@ -237,7 +237,7 @@ fn main() {
 
     b.run("timer/interval ticks", 1_000_000, |n| {
         mock().block_on(async {
-            let mut every = spool::interval(Duration::from_millis(1));
+            let mut every = spooly::interval(Duration::from_millis(1));
             for _ in 0..n {
                 every.tick().await;
             }
@@ -245,9 +245,9 @@ fn main() {
     });
 
     b.run("timer/timeout (completes first)", 1_000_000, |n| {
-        spool::Runtime::new().block_on(async {
+        spooly::Runtime::new().block_on(async {
             for i in 0..n {
-                let out = spool::timeout(Duration::from_secs(1), async move { i }).await;
+                let out = spooly::timeout(Duration::from_secs(1), async move { i }).await;
                 black_box(out.unwrap());
             }
         });

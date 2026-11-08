@@ -60,7 +60,7 @@ fn main() {
     let results = Rc::new(RefCell::new(Vec::new()));
 
     let r = results.clone();
-    spool::run(async move {
+    spooly::run(async move {
         // Await the threads from `main`: the loop parks while they work.
         let (a, b) = (on_thread(|| slow_square(3)), on_thread(|| slow_square(4)));
         println!("3² + 4² = {}", a.await + b.await);
@@ -68,9 +68,9 @@ fn main() {
         // Detached tasks waiting on threads don't keep `run` alive by
         // themselves. A `KeepAlive` per task does.
         for n in 5..8 {
-            let keep = spool::keep_alive();
+            let keep = spooly::keep_alive();
             let r = r.clone();
-            drop(spool::spawn(async move {
+            drop(spooly::spawn(async move {
                 let squared = on_thread(move || slow_square(n)).await;
                 r.borrow_mut().push((n, squared));
                 drop(keep);

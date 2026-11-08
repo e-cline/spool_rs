@@ -13,12 +13,12 @@ use std::task::{Context, Poll};
 /// ```
 /// use std::{cell::RefCell, rc::Rc};
 ///
-/// spool::block_on(async {
+/// spooly::block_on(async {
 ///     let log = Rc::new(RefCell::new(Vec::new()));
 ///     let l = log.clone();
-///     let task = spool::spawn(async move { l.borrow_mut().push("task") });
+///     let task = spooly::spawn(async move { l.borrow_mut().push("task") });
 ///     log.borrow_mut().push("before yield");
-///     spool::yield_now().await;
+///     spooly::yield_now().await;
 ///     log.borrow_mut().push("after yield");
 ///     task.await;
 ///     assert_eq!(*log.borrow(), ["before yield", "task", "after yield"]);

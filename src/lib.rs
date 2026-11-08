@@ -1,4 +1,4 @@
-//! # Spool
+//! # Spooly
 //!
 //! A lightweight, single-threaded async executor, with a scheduling model
 //! inspired by the JavaScript event loop.
@@ -15,17 +15,17 @@
 //! ```
 //! use std::{cell::RefCell, rc::Rc};
 //!
-//! let log = spool::block_on(async {
+//! let log = spooly::block_on(async {
 //!     let log = Rc::new(RefCell::new(Vec::new()));
 //!     let (a, b) = (log.clone(), log.clone());
-//!     let task_a = spool::spawn(async move {
+//!     let task_a = spooly::spawn(async move {
 //!         a.borrow_mut().push("a1");
-//!         spool::yield_now().await;
+//!         spooly::yield_now().await;
 //!         a.borrow_mut().push("a2");
 //!     });
-//!     let task_b = spool::spawn(async move {
+//!     let task_b = spooly::spawn(async move {
 //!         b.borrow_mut().push("b1");
-//!         spool::yield_now().await;
+//!         spooly::yield_now().await;
 //!         b.borrow_mut().push("b2");
 //!     });
 //!     task_a.await;
@@ -38,11 +38,11 @@
 //!
 //! ## Coming from JavaScript
 //!
-//! Spool borrows JS names where they are the clearest ones, but it is not a
+//! Spooly borrows JS names where they are the clearest ones, but it is not a
 //! reimplementation of Node or the browser: each item documents its own
 //! behavior. The closest JS counterparts:
 //!
-//! | Spool | Closest JS |
+//! | Spooly | Closest JS |
 //! |---|---|
 //! | [`spawn`] | `queueMicrotask(asyncFn)` (the task starts on the microtask queue) |
 //! | `handle.await` | `await promise` |
@@ -63,7 +63,7 @@
 //!   `process.nextTick`.
 //! - Delays aren't clamped to 1ms, but a zero delay still waits for the next
 //!   timers phase.
-//! - A panic is not a rejected promise: Spool never catches it (see
+//! - A panic is not a rejected promise: Spooly never catches it (see
 //!   [Panics](#panics)). Errors a caller should handle are `Result` values.
 //!
 //! ## The event loop
@@ -88,10 +88,10 @@
 //!
 //! let log = Rc::new(RefCell::new(Vec::new()));
 //! let l = log.clone();
-//! spool::run(async move {
+//! spooly::run(async move {
 //!     let (a, b) = (l.clone(), l.clone());
-//!     spool::set_timeout(Duration::ZERO, move || a.borrow_mut().push("timeout"));
-//!     spool::queue_microtask(move || b.borrow_mut().push("microtask"));
+//!     spooly::set_timeout(Duration::ZERO, move || a.borrow_mut().push("timeout"));
+//!     spooly::queue_microtask(move || b.borrow_mut().push("microtask"));
 //!     l.borrow_mut().push("sync");
 //! });
 //! assert_eq!(*log.borrow(), ["sync", "microtask", "timeout"]);
@@ -123,7 +123,7 @@
 //!
 //! ## Panics
 //!
-//! Spool doesn't catch panics, so they behave the same on every target. A
+//! Spooly doesn't catch panics, so they behave the same on every target. A
 //! panic in `main`, in any task (awaited or not), or in a microtask or timer
 //! callback stops the loop at once:
 //!
@@ -131,7 +131,7 @@
 //!   of [`run`] / [`block_on`];
 //! - with `panic = "abort"` (the default on WASM), it ends the program.
 //!
-//! Which of the two happens is your application's choice: Spool doesn't
+//! Which of the two happens is your application's choice: Spooly doesn't
 //! override it. To make native behave exactly like WASM, set this in your
 //! application's `Cargo.toml` (tests always unwind, whatever it says):
 //!
@@ -165,10 +165,10 @@
 //! ```
 //! use std::time::Duration;
 //!
-//! let clock = spool::MockClock::new();
-//! let rt = spool::Runtime::builder().clock(clock.clone()).build();
+//! let clock = spooly::MockClock::new();
+//! let rt = spooly::Runtime::builder().clock(clock.clone()).build();
 //! let result = rt.block_on(async {
-//!     spool::timeout(Duration::from_secs(30), std::future::pending::<()>()).await
+//!     spooly::timeout(Duration::from_secs(30), std::future::pending::<()>()).await
 //! });
 //! assert!(result.is_err());
 //! assert_eq!(clock.elapsed(), Duration::from_secs(30)); // In no real time.

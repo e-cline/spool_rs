@@ -35,7 +35,7 @@ jobs:
           # Beta's diagnostics differ from the stable wording the trybuild
           # .stderr files pin. Regenerate them (TRYBUILD=overwrite) when
           # stable catches up.
-          SPOOL_SKIP_UI: ${{ matrix.toolchain == 'beta' && '1' || '0' }}
+          SPOOLY_SKIP_UI: ${{ matrix.toolchain == 'beta' && '1' || '0' }}
       - run: cargo test --doc
       - name: Stress tests
         if: github.event_name == 'schedule'

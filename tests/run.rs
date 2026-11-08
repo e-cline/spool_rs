@@ -11,14 +11,14 @@ use common::{DropCounter, Gate, Trace, expect_panic, never, oneshot};
 
 #[test]
 fn returns_mains_output() {
-    assert_eq!(spool::run(async { "done" }), "done");
+    assert_eq!(spooly::run(async { "done" }), "done");
 }
 
 #[test]
 fn main_can_borrow_from_the_caller() {
     let mut v = vec![1];
-    spool::run(async {
-        spool::yield_now().await;
+    spooly::run(async {
+        spooly::yield_now().await;
         v.push(2);
     });
     assert_eq!(v, [1, 2]);
@@ -28,11 +28,11 @@ fn main_can_borrow_from_the_caller() {
 fn waits_for_detached_tasks() {
     let trace = Trace::new();
     let t = trace.clone();
-    spool::run(async move {
-        drop(spool::spawn(async move {
+    spooly::run(async move {
+        drop(spooly::spawn(async move {
             for i in 0..3 {
                 t.log(format!("step {i}"));
-                spool::yield_now().await;
+                spooly::yield_now().await;
             }
         }));
     });
@@ -43,15 +43,15 @@ fn waits_for_detached_tasks() {
 fn waits_for_work_queued_after_main_completes() {
     let trace = Trace::new();
     let t = trace.clone();
-    spool::run(async move {
+    spooly::run(async move {
         let t1 = t.clone();
-        spool::queue_microtask(move || {
+        spooly::queue_microtask(move || {
             t1.log("microtask");
             let t2 = t1.clone();
-            spool::set_timeout(std::time::Duration::ZERO, move || {
+            spooly::set_timeout(std::time::Duration::ZERO, move || {
                 t2.log("timeout");
                 let t3 = t2.clone();
-                drop(spool::spawn(async move { t3.log("task") }));
+                drop(spooly::spawn(async move { t3.log("task") }));
             });
         });
         t.log("main done");
@@ -66,8 +66,8 @@ fn pending_detached_tasks_do_not_keep_the_loop_alive() {
     let tok = counter.token();
     let started = Rc::new(Cell::new(false));
     let s = started.clone();
-    spool::run(async move {
-        drop(spool::spawn(async move {
+    spooly::run(async move {
+        drop(spooly::spawn(async move {
             let _tok = tok;
             s.set(true);
             never().await;
@@ -92,8 +92,8 @@ fn remote_waits_of_detached_tasks_do_not_keep_the_loop_alive() {
     });
     let finished = Rc::new(Cell::new(false));
     let f = finished.clone();
-    spool::run(async move {
-        drop(spool::spawn(async move {
+    spooly::run(async move {
+        drop(spooly::spawn(async move {
             rx.await;
             f.set(true);
         }));
@@ -109,30 +109,30 @@ fn main_waiting_on_another_thread_keeps_the_loop_alive() {
         thread::sleep(Duration::from_millis(20));
         tx.send(5);
     });
-    assert_eq!(spool::run(rx), 5);
+    assert_eq!(spooly::run(rx), 5);
     worker.join().unwrap();
 }
 
 #[test]
 fn stalled_main_panics() {
-    let msg = expect_panic(|| spool::run(never()));
+    let msg = expect_panic(|| spooly::run(never()));
     assert!(msg.contains("main future stalled"), "{msg}");
 }
 
 #[test]
 fn nested_run_panics() {
-    let msg = expect_panic(|| spool::run(async { spool::run(async {}) }));
+    let msg = expect_panic(|| spooly::run(async { spooly::run(async {}) }));
     assert!(msg.contains("nested `block_on`"), "{msg}");
 }
 
 #[test]
 fn runtime_run_can_be_called_repeatedly() {
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     let total = Rc::new(Cell::new(0));
     for i in 1..=3 {
         let t = total.clone();
         rt.run(async move {
-            drop(spool::spawn(async move { t.set(t.get() + i) }));
+            drop(spooly::spawn(async move { t.set(t.get() + i) }));
         });
     }
     assert_eq!(total.get(), 6);
@@ -140,12 +140,12 @@ fn runtime_run_can_be_called_repeatedly() {
 
 #[test]
 fn run_flushes_work_left_by_an_earlier_block_on() {
-    let rt = spool::Runtime::new();
+    let rt = spooly::Runtime::new();
     let trace = Trace::new();
     let t = trace.clone();
     rt.block_on(async move {
         let t1 = t.clone();
-        spool::queue_microtask(move || t1.log("leftover"));
+        spooly::queue_microtask(move || t1.log("leftover"));
     });
     trace.assert(&[]);
     let t = trace.clone();
@@ -159,12 +159,12 @@ fn main_first_poll_runs_before_its_own_queued_work() {
     // The first poll is a macrotask, like a program's top-level code (D4a).
     let trace = Trace::new();
     let t = trace.clone();
-    spool::run(async move {
+    spooly::run(async move {
         let t1 = t.clone();
-        spool::queue_microtask(move || t1.log("microtask"));
+        spooly::queue_microtask(move || t1.log("microtask"));
         t.log("script 1");
         let t2 = t.clone();
-        drop(spool::spawn(async move { t2.log("task") }));
+        drop(spooly::spawn(async move { t2.log("task") }));
         t.log("script 2");
     });
     trace.assert(&["script 1", "script 2", "microtask", "task"]);
@@ -172,12 +172,12 @@ fn main_first_poll_runs_before_its_own_queued_work() {
 
 #[test]
 fn main_waiting_on_a_gate_opened_after_other_work() {
-    let out = spool::run(async {
+    let out = spooly::run(async {
         let gate = Gate::new();
         let g = gate.clone();
-        drop(spool::spawn(async move {
+        drop(spooly::spawn(async move {
             for _ in 0..5 {
-                spool::yield_now().await;
+                spooly::yield_now().await;
             }
             g.open();
         }));

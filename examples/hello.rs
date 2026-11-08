@@ -6,19 +6,19 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 fn main() {
-    // `Rc` and `Cell` are fine: Spool never requires `Send`.
+    // `Rc` and `Cell` are fine: Spooly never requires `Send`.
     let counter = Rc::new(Cell::new(0));
 
-    let total = spool::block_on(async {
+    let total = spooly::block_on(async {
         let workers: Vec<_> = ["alpha", "beta", "gamma"]
             .into_iter()
             .map(|name| {
                 let counter = counter.clone();
-                spool::spawn(async move {
+                spooly::spawn(async move {
                     for step in 1..=2 {
                         counter.set(counter.get() + 1);
                         println!("{name}: step {step} (counter = {})", counter.get());
-                        spool::yield_now().await;
+                        spooly::yield_now().await;
                     }
                     name.len()
                 })

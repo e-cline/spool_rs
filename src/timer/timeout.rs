@@ -16,20 +16,20 @@ use crate::clock::Instant;
 ///
 /// # Panics
 ///
-/// If called outside a Spool runtime.
+/// If called outside a Spooly runtime.
 ///
 /// ```
 /// use std::time::Duration;
 ///
-/// let clock = spool::MockClock::new();
-/// let rt = spool::Runtime::builder().clock(clock).build();
+/// let clock = spooly::MockClock::new();
+/// let rt = spooly::Runtime::builder().clock(clock).build();
 /// rt.block_on(async {
-///     let slow = spool::sleep(Duration::from_secs(10));
-///     let result = spool::timeout(Duration::from_secs(1), slow).await;
-///     assert_eq!(result, Err(spool::Elapsed::new()));
+///     let slow = spooly::sleep(Duration::from_secs(10));
+///     let result = spooly::timeout(Duration::from_secs(1), slow).await;
+///     assert_eq!(result, Err(spooly::Elapsed::new()));
 ///
 ///     let quick = async { 7 };
-///     assert_eq!(spool::timeout(Duration::from_secs(1), quick).await, Ok(7));
+///     assert_eq!(spooly::timeout(Duration::from_secs(1), quick).await, Ok(7));
 /// });
 /// ```
 pub fn timeout<F: Future>(duration: Duration, future: F) -> Timeout<F> {
@@ -44,21 +44,21 @@ pub fn timeout<F: Future>(duration: Duration, future: F) -> Timeout<F> {
 /// ```
 /// use std::time::Duration;
 ///
-/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// let rt = spooly::Runtime::builder().clock(spooly::MockClock::new()).build();
 /// rt.block_on(async {
 ///     // One deadline shared by several steps.
-///     let deadline = spool::now() + Duration::from_secs(5);
-///     let first = spool::timeout_at(deadline, spool::sleep(Duration::from_secs(3))).await;
+///     let deadline = spooly::now() + Duration::from_secs(5);
+///     let first = spooly::timeout_at(deadline, spooly::sleep(Duration::from_secs(3))).await;
 ///     assert!(first.is_ok());
-///     let second = spool::timeout_at(deadline, spool::sleep(Duration::from_secs(3))).await;
+///     let second = spooly::timeout_at(deadline, spooly::sleep(Duration::from_secs(3))).await;
 ///     assert!(second.is_err(), "only 2s were left");
-///     assert_eq!(spool::now(), deadline);
+///     assert_eq!(spooly::now(), deadline);
 /// });
 /// ```
 ///
 /// # Panics
 ///
-/// If called outside a Spool runtime.
+/// If called outside a Spooly runtime.
 pub fn timeout_at<F: Future>(deadline: Instant, future: F) -> Timeout<F> {
     Timeout {
         future: Some(Box::pin(future)),
@@ -77,9 +77,9 @@ pub fn timeout_at<F: Future>(deadline: Instant, future: F) -> Timeout<F> {
 /// ```
 /// use std::time::Duration;
 ///
-/// let rt = spool::Runtime::builder().clock(spool::MockClock::new()).build();
+/// let rt = spooly::Runtime::builder().clock(spooly::MockClock::new()).build();
 /// rt.block_on(async {
-///     let t = spool::timeout(Duration::from_secs(2), async { "done" });
+///     let t = spooly::timeout(Duration::from_secs(2), async { "done" });
 ///     assert_eq!(t.deadline().epoch_offset(), Duration::from_secs(2));
 ///     assert_eq!(t.await, Ok("done"));
 /// });
@@ -105,7 +105,7 @@ impl<F: Future> Future for Timeout<F> {
         let future = this
             .future
             .as_mut()
-            .expect("spool: `Timeout` polled after it completed");
+            .expect("spooly: `Timeout` polled after it completed");
         if let Poll::Ready(output) = future.as_mut().poll(cx) {
             this.future = None;
             return Poll::Ready(Ok(output));
@@ -130,7 +130,7 @@ impl<F: Future> fmt::Debug for Timeout<F> {
 /// The error returned by [`timeout`] when the time runs out.
 ///
 /// ```
-/// let err = spool::Elapsed::new();
+/// let err = spooly::Elapsed::new();
 /// assert_eq!(err.to_string(), "deadline has elapsed");
 /// let boxed: Box<dyn std::error::Error> = Box::new(err); // Works with `?`.
 /// # drop(boxed);
