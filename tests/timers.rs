@@ -841,7 +841,8 @@ fn dropping_a_timer_callback_during_teardown_can_set_timers() {
 #[test]
 fn handles_outliving_their_runtime_are_harmless() {
     let (rt, _clock) = mock();
-    let (handle, sleep) = rt.block_on(async { (spooly::set_timeout(MS, || {}), spooly::sleep(MS)) });
+    let (handle, sleep) =
+        rt.block_on(async { (spooly::set_timeout(MS, || {}), spooly::sleep(MS)) });
     drop(rt);
     assert!(!handle.is_active());
     handle.cancel();

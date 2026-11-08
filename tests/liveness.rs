@@ -241,8 +241,9 @@ fn a_chain_of_stuck_tasks_is_a_stall() {
 
 #[test]
 fn every_join_flavor_is_seen_through() {
-    let msg =
-        expect_panic(|| spooly::block_on(async { spooly::spawn(never()).try_join().await.is_ok() }));
+    let msg = expect_panic(|| {
+        spooly::block_on(async { spooly::spawn(never()).try_join().await.is_ok() })
+    });
     assert!(msg.contains(STALLED), "try_join: {msg}");
     let msg =
         expect_panic(|| spooly::block_on(async { spooly::spawn(never()).abort_on_drop().await }));
