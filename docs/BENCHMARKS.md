@@ -1,7 +1,7 @@
 # Benchmarks
 
-`benches/throughput.rs` measures the hot paths: spawning, waking, the tick
-and microtask queues, and timers. It is dependency-free: each benchmark runs a
+`benches/throughput.rs` measures the hot paths: spawning, waking, the
+microtask queue, and timers. It is dependency-free: each benchmark runs a
 batch of operations 11 times and reports the median and best time per
 operation.
 
@@ -15,6 +15,9 @@ bookkeeping, not real waiting.
 
 ## Baseline (v1, safe code)
 
+*(Measured before M7, which removed `next_tick` and its benchmark, and changed
+how intervals re-arm. The rest of the hot paths are unchanged.)*
+
 The numbers the performance phase (plan §9.6) has to beat. Measured at the
 end of M6 on an Apple M2 Pro with rustc 1.98.1, release profile.
 
@@ -27,7 +30,6 @@ end of M6 on an Apple M2 Pro with rustc 1.98.1, release profile.
 | `wake/yield_now (1k tasks)` | 16.6 ns | 60 M/s | the same, across 1,000 interleaved tasks |
 | `wake/remote (from another thread)` | 195 ns | 5.1 M/s | wake a task from another thread, and run it |
 | `queue/queue_microtask` | 29.2 ns | 34 M/s | queue a microtask callback and run it |
-| `queue/next_tick` | 28.0 ns | 36 M/s | queue a tick callback and run it |
 | `timer/set_timeout + fire` | 260 ns | 3.9 M/s | arm a callback timer (1M pending, 1,000 deadlines), fire it |
 | `timer/set_timeout + cancel` | 19.7 ns | 51 M/s | arm a callback timer and cancel it at once |
 | `timer/sleep (1k tasks)` | 125 ns | 8.0 M/s | one `sleep().await`, across 1,000 tasks |

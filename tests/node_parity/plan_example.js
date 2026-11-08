@@ -8,7 +8,6 @@ function deferred() {
 async function main() {
   setTimeout(() => console.log("timeout 40ms"), 40);
   queueMicrotask(() => console.log("microtask"));
-  process.nextTick(() => console.log("nextTick"));
   console.log("sync");
   const h = deferred();
   queueMicrotask(async () => {

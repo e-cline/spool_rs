@@ -14,7 +14,7 @@ use crate::slab::Key;
 ///
 /// The timer starts when `sleep` is called, not when the future is first
 /// polled. The future completes in a timers phase, so even a zero duration
-/// yields past every queued tick and microtask:
+/// yields past every queued microtask:
 /// `sleep(Duration::ZERO).await` is the way to yield to timers.
 ///
 /// Dropping the `Sleep` cancels its timer.

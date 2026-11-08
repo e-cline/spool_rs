@@ -1,10 +1,10 @@
-//! `queue_microtask` and `next_tick`: API behavior and edge cases.
-//! (Ordering against Node lives in tests/node_parity.rs.)
+//! `queue_microtask`: API behavior and edge cases.
 
 mod common;
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use common::{DropCounter, OnDrop, Trace, expect_panic};
 
@@ -15,19 +15,13 @@ fn queue_microtask_outside_a_runtime_panics() {
 }
 
 #[test]
-fn next_tick_outside_a_runtime_panics() {
-    let msg = expect_panic(|| spool::next_tick(|| {}));
-    assert!(msg.contains("`next_tick` called outside"), "{msg}");
-}
-
-#[test]
 fn callbacks_can_capture_non_send_state() {
     let hits = Rc::new(Cell::new(0));
     let h = hits.clone();
     spool::run(async move {
         let (a, b) = (h.clone(), h.clone());
         spool::queue_microtask(move || a.set(a.get() + 1));
-        spool::next_tick(move || b.set(b.get() + 10));
+        spool::queue_microtask(move || b.set(b.get() + 10));
     });
     assert_eq!(hits.get(), 11);
 }
@@ -47,42 +41,23 @@ fn microtasks_and_task_polls_share_one_fifo() {
 }
 
 #[test]
-fn microtask_queued_while_draining_runs_before_ticks() {
+fn microtasks_queued_while_draining_run_before_the_next_timer() {
     let trace = Trace::new();
     let t = trace.clone();
     spool::run(async move {
-        let t1 = t.clone();
+        let (t1, tt) = (t.clone(), t.clone());
+        spool::set_timeout(Duration::ZERO, move || tt.log("timeout"));
         spool::queue_microtask(move || {
             t1.log("m1");
             let t2 = t1.clone();
-            spool::queue_microtask(move || t2.log("m2 (queued by m1)"));
-            let t3 = t1.clone();
-            spool::next_tick(move || t3.log("tick (queued by m1)"));
+            spool::queue_microtask(move || {
+                t2.log("m2 (queued by m1)");
+                let t3 = t2.clone();
+                spool::queue_microtask(move || t3.log("m3 (queued by m2)"));
+            });
         });
     });
-    trace.assert(&["m1", "m2 (queued by m1)", "tick (queued by m1)"]);
-}
-
-#[test]
-fn ticks_starve_microtasks_until_the_tick_queue_is_empty() {
-    // Like Node: a chain of ticks keeps the microtask queue waiting.
-    fn chain(t: Trace, n: u32) {
-        if n == 0 {
-            return;
-        }
-        spool::next_tick(move || {
-            t.log(format!("tick {n}"));
-            chain(t, n - 1);
-        });
-    }
-    let trace = Trace::new();
-    let t = trace.clone();
-    spool::run(async move {
-        let tm = t.clone();
-        spool::queue_microtask(move || tm.log("microtask"));
-        chain(t, 3);
-    });
-    trace.assert(&["tick 3", "tick 2", "tick 1", "microtask"]);
+    trace.assert(&["m1", "m2 (queued by m1)", "m3 (queued by m2)", "timeout"]);
 }
 
 #[test]
@@ -103,28 +78,9 @@ fn long_microtask_chain_does_not_grow_the_stack() {
 }
 
 #[test]
-fn long_tick_chain_does_not_grow_the_stack() {
-    fn chain(counter: Rc<Cell<u32>>, n: u32) {
-        if n == 0 {
-            return;
-        }
-        spool::next_tick(move || {
-            counter.set(counter.get() + 1);
-            chain(counter, n - 1);
-        });
-    }
-    let counter = Rc::new(Cell::new(0));
-    let c = counter.clone();
-    spool::run(async move { chain(c, 200_000) });
-    assert_eq!(counter.get(), 200_000);
-}
-
-#[test]
 fn callback_panic_unwinds_out_of_run() {
     let msg = expect_panic(|| spool::run(async { spool::queue_microtask(|| panic!("cb boom")) }));
     assert_eq!(msg, "cb boom");
-    let msg = expect_panic(|| spool::run(async { spool::next_tick(|| panic!("tick boom")) }));
-    assert_eq!(msg, "tick boom");
 }
 
 #[test]
@@ -135,7 +91,7 @@ fn unrun_callbacks_are_dropped_with_the_runtime() {
     // `block_on` returns as soon as main completes, before the callbacks run.
     rt.block_on(async move {
         spool::queue_microtask(move || drop(a));
-        spool::next_tick(move || drop(b));
+        spool::queue_microtask(move || drop(b));
     });
     assert_eq!(counter.count(), 0);
     drop(rt);
@@ -151,16 +107,13 @@ fn dropping_a_callback_during_teardown_can_queue_more_callbacks() {
         let guard = OnDrop(move || {
             // Queue more work from inside a drop during teardown. It must be
             // dropped too, without running and without a `BorrowMutError`.
-            let tok = c.token();
-            spool::queue_microtask(move || {
-                let _tok = tok;
-                panic!("must not run");
-            });
-            let tok = c.token();
-            spool::next_tick(move || {
-                let _tok = tok;
-                panic!("must not run");
-            });
+            for _ in 0..2 {
+                let tok = c.token();
+                spool::queue_microtask(move || {
+                    let _tok = tok;
+                    panic!("must not run");
+                });
+            }
         });
         spool::queue_microtask(move || drop(guard));
     });
@@ -173,11 +126,11 @@ fn callbacks_run_when_main_waits_on_them() {
     let out = spool::block_on(async {
         let gate = common::Gate::new();
         let g = gate.clone();
-        spool::next_tick(move || g.open());
+        spool::queue_microtask(move || g.open());
         gate.wait().await;
-        "opened by a tick"
+        "opened by a microtask"
     });
-    assert_eq!(out, "opened by a tick");
+    assert_eq!(out, "opened by a microtask");
 }
 
 #[test]
@@ -185,16 +138,15 @@ fn block_on_returns_without_running_callbacks_when_main_is_done() {
     let trace = Trace::new();
     let t = trace.clone();
     spool::block_on(async move {
-        let (t1, t2) = (t.clone(), t.clone());
+        let t1 = t.clone();
         spool::queue_microtask(move || t1.log("microtask"));
-        spool::next_tick(move || t2.log("tick"));
         t.log("main");
     });
     trace.assert(&["main"]);
 }
 
 #[test]
-fn a_tick_queued_by_a_task_runs_after_the_microtask_queue_drains() {
+fn a_microtask_queued_by_a_task_runs_in_fifo_order() {
     let trace = Trace::new();
     let t = trace.clone();
     spool::run(async move {
@@ -202,13 +154,13 @@ fn a_tick_queued_by_a_task_runs_after_the_microtask_queue_drains() {
         drop(spool::spawn(async move {
             t1.log("task 1");
             let t2 = t1.clone();
-            spool::next_tick(move || t2.log("tick from task"));
+            spool::queue_microtask(move || t2.log("microtask from task"));
             spool::yield_now().await;
             t1.log("task 2");
         }));
         let t3 = t.clone();
         spool::queue_microtask(move || t3.log("microtask"));
     });
-    // The task's resumption is a microtask, so it runs before the tick.
-    trace.assert(&["task 1", "microtask", "task 2", "tick from task"]);
+    // The task's resumption is queued after the microtask it queued.
+    trace.assert(&["task 1", "microtask", "microtask from task", "task 2"]);
 }

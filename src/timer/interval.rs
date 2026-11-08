@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
+use super::next_interval_deadline;
 use super::sleep::{Sleep, sleep};
 use crate::clock::Instant;
 
@@ -10,8 +11,11 @@ use crate::clock::Instant;
 /// completes immediately.
 ///
 /// This is the future-style counterpart of [`set_interval`](crate::set_interval),
-/// with the same Node-like drift behavior: after each tick, the next one is
-/// due `period` after the tick completed. Missed ticks are not replayed.
+/// with the same fixed schedule: created at `t0`, the ticks are due at `t0`,
+/// `t0 + period`, `t0 + 2·period`, and so on, however long the code between
+/// ticks takes. If the caller falls behind by a whole period or more, the
+/// missed ticks are skipped: the next `tick` completes once, and the one
+/// after it waits for the first scheduled time that hasn't passed yet.
 ///
 /// Dropping the `Interval` cancels it.
 ///
@@ -77,7 +81,8 @@ pub struct Interval {
 }
 
 impl Interval {
-    /// Waits for the next tick, and returns the time it completed at.
+    /// Waits for the next tick, and returns the time it was scheduled for
+    /// (which is earlier than [`now`](crate::now) if the tick is late).
     ///
     /// Cancel-safe: if the returned future is dropped before it completes,
     /// no tick is lost.
@@ -90,12 +95,15 @@ impl Interval {
         let inner = self.sleep.runtime("Interval");
         if self.first_tick {
             self.first_tick = false;
-            return Poll::Ready(inner.now());
+            // The creation time: the sleep is armed one period later.
+            let deadline = self.sleep.deadline();
+            return Poll::Ready(deadline.checked_sub(self.period).unwrap_or(deadline));
         }
         ready!(Pin::new(&mut self.sleep).poll(cx));
-        let now = inner.now();
-        self.sleep.reset(now.saturating_add(self.period));
-        Poll::Ready(now)
+        let scheduled = self.sleep.deadline();
+        let next = next_interval_deadline(scheduled, self.period, inner.now());
+        self.sleep.reset(next);
+        Poll::Ready(scheduled)
     }
 
     /// The interval's period.

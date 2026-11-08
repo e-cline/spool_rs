@@ -1,5 +1,5 @@
 //! Stress tests (plan §8.1): large task counts, many timers with random
-//! cancellation, very long tick/microtask/join chains, and heavy cross-thread
+//! cancellation, very long microtask and join chains, and heavy cross-thread
 //! waking. They check that nothing overflows the stack, nothing is lost, and
 //! time grows roughly linearly.
 //!
@@ -193,29 +193,23 @@ fn ten_thousand_intervals() {
 
 #[test]
 #[ignore = "stress test"]
-fn a_million_chained_ticks_and_microtasks() {
-    // Each callback queues the next: the queues must not recurse.
+fn two_interleaved_million_microtask_chains() {
+    // Each callback queues the next: the queue must not recurse.
     const N: usize = 1_000_000;
-    fn chain_tick(left: usize, count: Rc<Cell<usize>>) {
+    fn chain(left: usize, count: Rc<Cell<usize>>) {
         count.set(count.get() + 1);
         if left > 0 {
-            spool::next_tick(move || chain_tick(left - 1, count));
+            spool::queue_microtask(move || chain(left - 1, count));
         }
     }
-    fn chain_micro(left: usize, count: Rc<Cell<usize>>) {
-        count.set(count.get() + 1);
-        if left > 0 {
-            spool::queue_microtask(move || chain_micro(left - 1, count));
-        }
-    }
-    let ticks = Rc::new(Cell::new(0));
-    let micros = Rc::new(Cell::new(0));
-    let (t, m) = (ticks.clone(), micros.clone());
+    let a = Rc::new(Cell::new(0));
+    let b = Rc::new(Cell::new(0));
+    let (ca, cb) = (a.clone(), b.clone());
     spool::run(async move {
-        spool::next_tick(move || chain_tick(N - 1, t));
-        spool::queue_microtask(move || chain_micro(N - 1, m));
+        spool::queue_microtask(move || chain(N - 1, ca));
+        spool::queue_microtask(move || chain(N - 1, cb));
     });
-    assert_eq!((ticks.get(), micros.get()), (N, N));
+    assert_eq!((a.get(), b.get()), (N, N));
 }
 
 #[test]

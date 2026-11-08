@@ -33,7 +33,6 @@ const POISONED_MESSAGE: &str = "spool: this runtime is poisoned: a panic unwound
 pub(crate) struct Inner {
     /// A weak reference to this `Inner`, for handing out `TimerHandle`s.
     this: Weak<Inner>,
-    ticks: Queue<Callback>,
     microtasks: Queue<Microtask>,
     tasks: RefCell<Slab<TaskSlot>>,
     timers: RefCell<TimerQueue>,
@@ -52,7 +51,6 @@ impl Inner {
         let id = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
         Rc::new_cyclic(|this| Inner {
             this: this.clone(),
-            ticks: Queue::default(),
             microtasks: Queue::default(),
             tasks: RefCell::new(Slab::new()),
             timers: RefCell::new(TimerQueue::default()),
@@ -82,10 +80,6 @@ impl Inner {
 
     pub(crate) fn queue_microtask(&self, callback: Callback) {
         self.microtasks.push(Microtask::Callback(callback));
-    }
-
-    pub(crate) fn next_tick(&self, callback: Callback) {
-        self.ticks.push(callback);
     }
 
     pub(crate) fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
@@ -220,15 +214,8 @@ impl Inner {
         }
     }
 
-    /// Drains the tick and microtask queues, following Node's
-    /// `processTicksAndRejections` (§3.2 of the plan):
-    ///
-    /// ```text
-    /// loop:
-    ///     run every tick (including ticks queued meanwhile)
-    ///     run every microtask (including microtasks queued meanwhile)
-    ///     if no ticks were queued by the microtasks: done
-    /// ```
+    /// Drains the microtask queue, including microtasks queued meanwhile
+    /// (§3.2 of the plan).
     ///
     /// `poll_main` is called for each `Poll(MAIN_TASK)` entry. If it returns
     /// `true`, draining stops immediately and this returns `true`.
@@ -236,29 +223,21 @@ impl Inner {
     /// An unobserved panic is re-raised before the next item runs.
     fn drain(&self, poll_main: &mut dyn FnMut() -> bool) -> bool {
         self.raise_unobserved();
-        loop {
-            while let Some(tick) = self.ticks.pop() {
-                tick();
-                self.raise_unobserved();
-            }
-            while let Some(microtask) = self.microtasks.pop() {
-                match microtask {
-                    Microtask::Poll(id) if id == MAIN_TASK => {
-                        let done = poll_main();
-                        self.raise_unobserved();
-                        if done {
-                            return true;
-                        }
+        while let Some(microtask) = self.microtasks.pop() {
+            match microtask {
+                Microtask::Poll(id) if id == MAIN_TASK => {
+                    let done = poll_main();
+                    self.raise_unobserved();
+                    if done {
+                        return true;
                     }
-                    Microtask::Poll(id) => self.poll_task(id),
-                    Microtask::Callback(callback) => callback(),
                 }
-                self.raise_unobserved();
+                Microtask::Poll(id) => self.poll_task(id),
+                Microtask::Callback(callback) => callback(),
             }
-            if self.ticks.is_empty() {
-                return false;
-            }
+            self.raise_unobserved();
         }
+        false
     }
 
     /// Moves remotely woken tasks onto the microtask queue. Returns `true` if
@@ -273,8 +252,8 @@ impl Inner {
     }
 
     /// The timers phase (§3.3). Fires every timer that is due at the phase's
-    /// start time and was armed before the phase started, draining ticks and
-    /// microtasks after each one.
+    /// start time and was armed before the phase started, draining the
+    /// microtask queue after each one.
     ///
     /// Returns `(fired_any, stop)`, where `stop` means `poll_main` asked to
     /// stop.
@@ -308,11 +287,10 @@ impl Inner {
                     let handle = TimerHandle::new(self.this.clone(), key);
                     (callback.borrow_mut())(&handle);
                     drop(callback);
-                    // Re-arm (Node-style, from this phase's time) unless the
-                    // callback cancelled it.
-                    self.timers
-                        .borrow_mut()
-                        .rearm(key, now.saturating_add(period));
+                    // Re-arm from the previous deadline, skipping any ticks
+                    // already missed (D7), unless the callback cancelled it.
+                    let after = self.clock.now();
+                    self.timers.borrow_mut().rearm_interval(key, period, after);
                 }
                 FireAction::Nothing => {}
             }
@@ -332,19 +310,17 @@ impl Inner {
         park::park(Some(deadline.saturating_duration_since(now)));
     }
 
-    /// Drops every task, tick, microtask, and timer, repeating until nothing
+    /// Drops every task, microtask, and timer, repeating until nothing
     /// is left (a `Drop` impl may queue more work). Everything is dropped
     /// outside of any `RefCell` borrow.
     fn tear_down(&self) {
         loop {
-            let ticks = self.ticks.take_all();
             let microtasks = self.microtasks.take_all();
             let slots = self.tasks.borrow_mut().drain();
             let timers = self.timers.borrow_mut().take_all();
-            if ticks.is_empty() && microtasks.is_empty() && slots.is_empty() && timers.is_empty() {
+            if microtasks.is_empty() && slots.is_empty() && timers.is_empty() {
                 break;
             }
-            drop(ticks);
             drop(microtasks);
             drop(slots);
             drop(timers);
@@ -369,8 +345,7 @@ impl Inner {
         assert!(!self.poisoned.get(), "{POISONED_MESSAGE}");
         let _poison = PoisonOnUnwind(&self.poisoned);
 
-        // Uphold Node's invariant that the queues are empty before a
-        // macrotask starts: flush work left over from an earlier `block_on`
+        // Every macrotask starts with an empty queue (D4a): flush work left over from an earlier `block_on`
         // or spawned before this call. (A leftover `Poll(MAIN_TASK)` is a
         // stale wake from an earlier main future; it is ignored.) This also
         // re-raises a panic that went unobserved between calls.
@@ -386,8 +361,8 @@ impl Inner {
         };
         let stop_when_main_done = mode == Mode::BlockOn;
 
-        // Main's first poll is the "script": a macrotask, like a JS program's
-        // top-level code. Ticks and microtasks it queues run after it.
+        // Main's first poll is a macrotask, like a program's top-level code
+        // (D4a). Microtasks it queues run after it.
         let done = main.poll_if_pending();
         self.raise_unobserved();
         if done && stop_when_main_done {
@@ -531,7 +506,7 @@ impl<F: Future> MainTask<'_, F> {
 /// when you want to spawn tasks before running, or to drive the same runtime
 /// several times.
 ///
-/// `Runtime` is `!Send` and `!Sync`. Dropping it drops every task, tick,
+/// `Runtime` is `!Send` and `!Sync`. Dropping it drops every task,
 /// microtask, and timer that is still pending.
 ///
 /// ```
@@ -601,20 +576,19 @@ impl Runtime {
     }
 
     /// Runs `future` to completion, then keeps running until the event loop
-    /// has nothing left to do, like a Node.js process. Returns `future`'s
-    /// output.
+    /// has nothing left to do. Returns `future`'s output.
     ///
-    /// The loop has "nothing left to do" when the tick and microtask queues
-    /// are empty, no timer is armed, and no [`KeepAlive`] guard exists. As in
-    /// Node, a detached task that is pending on something else (not a timer)
-    /// doesn't keep the loop alive: it stays on the runtime, and is dropped
+    /// The loop has "nothing left to do" when the microtask queue is empty,
+    /// no timer is armed, and no [`KeepAlive`] guard exists. A detached task
+    /// that is pending on something else (not a timer) doesn't keep the loop
+    /// alive: it stays on the runtime, and is dropped
     /// with it. Hold a `KeepAlive` while such a task waits for another
     /// thread.
     ///
     /// Before `future` is first polled, any work already queued on the runtime
     /// (for example, tasks spawned with [`Runtime::spawn`]) runs first. The
-    /// first poll of `future` then runs like a JS program's top-level code:
-    /// ticks and microtasks it queues run after it. Later polls (after an
+    /// first poll of `future` then runs like a program's top-level code:
+    /// microtasks it queues run after it. Later polls (after an
     /// `.await`) are microtasks.
     ///
     /// # Panics
@@ -628,14 +602,13 @@ impl Runtime {
     ///   be woken (from another thread, say), so the loop parks instead.
     /// - If the runtime is poisoned (see below).
     ///
-    /// Panics follow the JS-exception model. A panic unwinds out of `run`
+    /// Panics propagate like exceptions in async code. A panic unwinds out of `run`
     /// (the runtime then stays **poisoned**: later `run` / `block_on` calls on
     /// it panic, but a new `Runtime` works normally) when:
     ///
-    /// - `future` itself, or a tick, microtask, or timer callback, panics;
+    /// - `future` itself, or a microtask or timer callback, panics;
     /// - a task panics and nobody can observe it: its [`JoinHandle`] was
-    ///   dropped, or is dropped later without being awaited (like an
-    ///   unhandled promise rejection);
+    ///   dropped, or is dropped later without being awaited;
     /// - a task re-throws the panic of a task it awaited, and so on up.
     ///
     /// A task's panic that *is* observed (by awaiting its `JoinHandle`, or
@@ -757,29 +730,29 @@ impl fmt::Debug for Runtime {
             .field("id", &self.inner.id())
             .field("tasks", &self.inner.tasks.borrow().len())
             .field("now", &self.inner.now())
-            .field("ticks_empty", &self.inner.ticks.is_empty())
             .field("microtasks_empty", &self.inner.microtasks.is_empty())
             .finish()
     }
 }
 
 /// Runs `future` on a new runtime until it completes **and** the event loop
-/// has nothing left to do, like a Node.js process. Returns `future`'s output.
+/// has nothing left to do. Returns `future`'s output.
 ///
 /// This is shorthand for `Runtime::new().run(future)`. See [`Runtime::run`].
 ///
 /// ```
-/// use std::{cell::RefCell, rc::Rc};
+/// use std::{cell::RefCell, rc::Rc, time::Duration};
 ///
 /// let log = Rc::new(RefCell::new(Vec::new()));
 /// let l = log.clone();
 /// spool::run(async move {
 ///     let (a, b) = (l.clone(), l.clone());
-///     spool::queue_microtask(move || a.borrow_mut().push("microtask"));
-///     spool::next_tick(move || b.borrow_mut().push("tick"));
+///     spool::set_timeout(Duration::ZERO, move || a.borrow_mut().push("timeout"));
+///     spool::queue_microtask(move || b.borrow_mut().push("microtask"));
 ///     l.borrow_mut().push("sync");
 /// });
-/// assert_eq!(*log.borrow(), ["sync", "tick", "microtask"]);
+/// // `run` also waits for the timer, which `main` didn't await.
+/// assert_eq!(*log.borrow(), ["sync", "microtask", "timeout"]);
 /// ```
 pub fn run<F: Future>(future: F) -> F::Output {
     Runtime::new().run(future)
@@ -876,7 +849,6 @@ mod tests {
             rt_helpers::queue_both(a, b);
         });
         assert_eq!(hits.get(), 2);
-        assert!(rt.inner.ticks.is_empty());
         assert!(rt.inner.microtasks.is_empty());
     }
 
@@ -890,8 +862,7 @@ mod tests {
             rt_helpers::queue_both(a, b);
         });
         assert_eq!(hits.get(), 0);
-        assert_eq!(rt.inner.ticks.len(), 1);
-        assert_eq!(rt.inner.microtasks.len(), 1);
+        assert_eq!(rt.inner.microtasks.len(), 2);
         // The next drive flushes the leftovers before polling its main.
         let h = hits.clone();
         rt.block_on(async move { assert_eq!(h.get(), 2) });
@@ -921,7 +892,7 @@ mod tests {
 
         pub(super) fn queue_both(a: Rc<Cell<i32>>, b: Rc<Cell<i32>>) {
             crate::queue_microtask(move || a.set(a.get() + 1));
-            crate::next_tick(move || b.set(b.get() + 1));
+            crate::queue_microtask(move || b.set(b.get() + 1));
         }
     }
 }

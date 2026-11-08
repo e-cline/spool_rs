@@ -1,5 +1,5 @@
-//! The example from the README: Node-like ordering of ticks, microtasks,
-//! tasks, and timers.
+//! The example from the README: how microtasks, tasks, and timers are
+//! ordered, and an interval on its fixed schedule.
 //!
 //! Run with: `cargo run --example timers`
 
@@ -9,7 +9,6 @@ fn main() {
     spool::run(async {
         spool::set_timeout(Duration::from_millis(40), || println!("timeout 40ms"));
         spool::queue_microtask(|| println!("microtask"));
-        spool::next_tick(|| println!("nextTick"));
         println!("sync");
 
         let task = spool::spawn(async {

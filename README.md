@@ -1,11 +1,13 @@
 # spool_rs
 
-**Spool** is a lightweight, single-threaded Rust async executor with
-JavaScript / Node.js event-loop semantics.
+**Spool** is a lightweight, single-threaded Rust async executor, with a
+scheduling model inspired by the JavaScript event loop. It targets native
+platforms and WASM (browser and WASI support are in progress).
 
 - No `Send` or `Sync` required: use `Rc`, `RefCell`, and `Cell` freely in tasks.
-- Predictable, Node-like ordering: a woken task is queued as a microtask, in
-  FIFO order, just like the code after an `await` in JS.
+- Simple, predictable ordering: a woken task is queued as a microtask, in
+  FIFO order, like the code after an `await` in JS. Timers run one at a
+  time, and the microtask queue drains after each.
 - Zero runtime dependencies, no `unsafe`.
 
 ```rust
@@ -14,7 +16,6 @@ use std::time::Duration;
 spool::run(async {
     spool::set_timeout(Duration::from_millis(40), || println!("timeout 40ms"));
     spool::queue_microtask(|| println!("microtask"));
-    spool::next_tick(|| println!("nextTick"));
     println!("sync");
 
     let task = spool::spawn(async {
@@ -23,30 +24,30 @@ spool::run(async {
     });
     println!("joined: {}", task.await);
 });
-// Prints, exactly as the equivalent Node program does:
-// sync, nextTick, microtask, joined: 42, timeout 40ms
+// Prints: sync, microtask, joined: 42, timeout 40ms
 ```
 
-> **Status:** early development. Implemented so far: M0 (scaffold), M1 (core
-> loop: `block_on`, `spawn`, `JoinHandle`, `yield_now`), M2 (`queue_microtask`,
-> `next_tick`, Node's drain order, `run`), M3 (timers: `sleep`,
-> `timeout`, `interval`, `set_timeout`, `set_interval`, `MockClock`), M4
-> (cancellation and panics: `abort`, `AbortHandle`, `abort_on_drop`,
-> `try_join`, the JS-exception panic model, poisoning), and M5 (liveness and
-> threads: `KeepAlive`, stronger stall detection, randomized differential
-> tests against Node), and M6 (polish: a guide-style rustdoc with JS
-> equivalence tables, examples, stress tests, benchmarks, a coverage gate).
-> The v1 plan is complete; next is the performance phase. See
-> [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md).
+Spool borrows JS names where they're the clearest ones (`set_timeout`,
+`queue_microtask`), but it is not a reimplementation of Node or the browser:
+the design ([`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md)) defines its
+semantics.
 
-The crate docs (`cargo doc --open`) are the guide: the JS-to-Spool table, the
-event loop, cancellation, panics, threads, and testing with `MockClock`.
+> **Status:** early development. Done: M0–M6 (the core loop, microtasks,
+> timers, cancellation, the panic model, liveness and threads, and polish)
+> and M7 (realigning with design v4: no `next_tick`, intervals that don't
+> drift, and a reference model as the test oracle). Next: M8, a
+> non-blocking core so the loop can run in the browser. See
+> [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md) §12.
+
+The crate docs (`cargo doc --open`) are the guide: the closest JS
+counterparts, the event loop, cancellation, panics, threads, and testing
+with `MockClock`.
 
 ## Examples
 
 ```sh
 cargo run --example hello          # tasks interleaving at each `.await`
-cargo run --example timers         # the program above: ticks, microtasks, tasks, timers
+cargo run --example timers         # the program above, plus an interval
 cargo run --example cancellation   # timeouts, abort, abort_on_drop, cancelling timers
 cargo run --example panics         # try_join, re-throwing, unobserved panics, poisoning
 cargo run --example threads        # waking `!Send` tasks from worker threads, KeepAlive
@@ -55,26 +56,27 @@ cargo run --example threads        # waking `!Send` tasks from worker threads, K
 ## Development
 
 ```sh
-cargo test                 # full suite (Node parity tests skip if `node` is missing)
+cargo test
 cargo clippy --all-targets -- -D warnings
 cargo +nightly miri test   # needs: rustup +nightly component add miri
 ```
 
-The Node parity tests (`tests/node_parity.rs`) run each scenario in Spool and,
-as a JS twin in `tests/node_parity/`, in Node, and require identical traces.
-Set `SPOOL_REQUIRE_NODE=1` to make a missing `node` an error instead of a skip.
+`tests/model.rs` is the oracle: it generates random programs (microtasks,
+timers, intervals, cancellation, slow callbacks, tasks, aborts, panics), runs
+each on Spool and on a small reference simulator of the design, and requires
+identical traces.
 
-`tests/fuzz_ordering.rs` goes further: it generates random programs, runs
-each in Spool and (as generated JS, one worker per program) in Node, and
-compares the traces. To search harder:
+`tests/node_parity.rs` also runs a handful of scenarios as JS in Node, as an
+optional sanity check that Spool still behaves like a JS event loop. It needs
+`node` on `PATH`:
 
 ```sh
-SPOOL_FUZZ_CASES=5000 SPOOL_FUZZ_SEED=7 cargo test --test fuzz_ordering
+SPOOL_COMPARE_NODE=1 cargo test --test node_parity
 ```
 
 Stress tests (a million tasks, 100k timers with random cancellation, very
-long tick and join chains, heavy cross-thread waking) are `#[ignore]`d; CI
-runs them weekly:
+long microtask and join chains, heavy cross-thread waking) are `#[ignore]`d;
+CI runs them weekly:
 
 ```sh
 cargo test --release --test stress -- --ignored

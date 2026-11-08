@@ -6,8 +6,8 @@ use std::sync::Arc;
 use crate::context;
 use crate::waker::Shared;
 
-/// Keeps [`run`](crate::run) from exiting while it exists, like a ref'd
-/// handle (a timer or a socket) keeps a Node.js process alive.
+/// Keeps [`run`](crate::run) from exiting while it exists, the way an armed
+/// timer does.
 ///
 /// A `run` loop with nothing left to do normally returns, dropping any task
 /// that is still pending: a task waiting on something the runtime doesn't

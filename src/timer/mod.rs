@@ -3,7 +3,7 @@
 //!
 //! Every timer is an entry in a generational slab, plus an item in a binary
 //! heap keyed by `(deadline, seq)`. `seq` increases with every (re-)arm, so
-//! timers with equal deadlines fire in the order they were armed (as in JS),
+//! timers with equal deadlines fire in the order they were armed,
 //! and the timers phase can skip timers armed *during* the phase (D6).
 //! Cancelling removes the slab entry; its heap item goes stale and is
 //! skipped when it reaches the top (lazy deletion).
@@ -52,6 +52,23 @@ pub(crate) struct TimerEntry {
     /// `true` while the entry has a live item in the heap.
     armed: bool,
     pub(crate) state: TimerState,
+}
+
+/// The deadline after `previous` on an interval's fixed schedule
+/// (`previous + k·period`): the first one that isn't before `now`, so the
+/// schedule never drifts, and ticks that were missed are skipped rather than
+/// replayed in a burst (D7).
+pub(crate) fn next_interval_deadline(previous: Instant, period: Duration, now: Instant) -> Instant {
+    let next = previous.saturating_add(period);
+    if next >= now {
+        return next;
+    }
+    // Behind by at least one period: jump to the first deadline >= now.
+    let behind = now.duration_since(previous).as_nanos();
+    let period_ns = period.as_nanos();
+    let periods = behind.div_ceil(period_ns);
+    let skip = u32::try_from(periods).map_or(Duration::MAX, |k| period.saturating_mul(k));
+    previous.saturating_add(skip)
 }
 
 /// What firing a timer should do, computed under the borrow and carried out
@@ -115,6 +132,16 @@ impl TimerQueue {
         let entry = self.entries.remove(key);
         self.maybe_compact();
         entry
+    }
+
+    /// Re-arms an interval after it fired: at its previous deadline +
+    /// `period`, skipping any deadlines already before `now` (D7). Does
+    /// nothing if the timer was cancelled.
+    pub(crate) fn rearm_interval(&mut self, key: Key, period: Duration, now: Instant) {
+        if let Some(entry) = self.entries.get(key) {
+            let deadline = next_interval_deadline(entry.deadline, period, now);
+            self.rearm(key, deadline);
+        }
     }
 
     /// Re-arms an existing timer with a new deadline (and a new `seq`).
@@ -308,11 +335,10 @@ impl fmt::Debug for TimerHandle {
 
 /// Runs `callback` once after `delay`, like JS's `setTimeout`.
 ///
-/// The callback runs in the timers phase, as a macrotask: ticks and
-/// microtasks it queues run right after it, before the next timer. A zero
-/// delay means "as soon as possible", which is still after the current
-/// ticks and microtasks. (Spool doesn't clamp delays to 1ms the way Node
-/// does.)
+/// The callback runs in the timers phase, as a macrotask: microtasks it
+/// queues run right after it, before the next timer. A zero delay means "as
+/// soon as possible", which is still after the current microtasks. Delays
+/// aren't clamped to a minimum.
 ///
 /// The returned handle can cancel the timer. Dropping it does not.
 ///
@@ -354,9 +380,11 @@ pub fn set_timeout(delay: Duration, callback: impl FnOnce() + 'static) -> TimerH
 /// returned handle is cancelled.
 ///
 /// The callback receives the interval's own [`TimerHandle`], so it can
-/// cancel itself. After each run, the interval is re-armed at `now + period`
-/// (Node's behavior): a slow callback makes the interval drift, rather than
-/// replaying missed ticks in a burst.
+/// cancel itself. The interval keeps a fixed schedule: created at `t0`, it is
+/// due at `t0 + period`, `t0 + 2·period`, and so on, however long each
+/// callback takes. If the loop falls behind by a whole period or more, the
+/// missed runs are skipped: the callback runs once, and the next run is on
+/// the first scheduled time that hasn't passed yet.
 ///
 /// # Panics
 ///
@@ -518,5 +546,37 @@ mod tests {
         assert_eq!(q.take_all().len(), 2);
         assert_eq!(q.next_deadline(), None);
         assert_eq!(q.heap_len(), 0);
+    }
+
+    #[test]
+    fn interval_deadlines_keep_a_fixed_schedule() {
+        let p = Duration::from_millis(10);
+        // On time, or late by less than a period: no drift.
+        assert_eq!(next_interval_deadline(at(10), p, at(10)), at(20));
+        assert_eq!(next_interval_deadline(at(10), p, at(19)), at(20));
+        // Exactly one period late: the next deadline is due now, not missed.
+        assert_eq!(next_interval_deadline(at(10), p, at(20)), at(20));
+        // Late by more than a period: skip to the first deadline not passed.
+        assert_eq!(next_interval_deadline(at(10), p, at(21)), at(30));
+        assert_eq!(next_interval_deadline(at(10), p, at(55)), at(60));
+        assert_eq!(next_interval_deadline(at(10), p, at(60)), at(60));
+        // A clock that hasn't reached the previous deadline (it can't go
+        // backwards, but the math shouldn't care).
+        assert_eq!(next_interval_deadline(at(10), p, at(5)), at(20));
+    }
+
+    #[test]
+    fn rearm_interval_skips_missed_deadlines() {
+        let mut q = TimerQueue::default();
+        let callback: IntervalCallback = Rc::new(RefCell::new(Box::new(|_: &TimerHandle| {})));
+        let period = Duration::from_millis(10);
+        let key = q.insert(at(10), TimerState::Interval { period, callback });
+        assert_eq!(q.pop_expired(at(10), q.next_seq()), Some(key));
+        q.rearm_interval(key, period, at(35));
+        assert_eq!(q.next_deadline(), Some(at(40)));
+        // A cancelled interval stays cancelled.
+        drop(q.remove(key));
+        q.rearm_interval(key, period, at(45));
+        assert_eq!(q.next_deadline(), None);
     }
 }

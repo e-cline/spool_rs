@@ -41,8 +41,6 @@ fn panic_in_main_unwinds_out_of_run() {
 fn panics_in_callbacks_unwind_out_at_once() {
     let msg = expect_panic(|| spool::run(async { spool::queue_microtask(|| panic!("micro")) }));
     assert_eq!(msg, "micro");
-    let msg = expect_panic(|| spool::run(async { spool::next_tick(|| panic!("tick")) }));
-    assert_eq!(msg, "tick");
     let msg = expect_panic(|| {
         spool::run(async {
             spool::set_timeout(Duration::ZERO, || panic!("timer"));

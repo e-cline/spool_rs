@@ -1,6 +1,10 @@
-//! Differential tests: each scenario runs in Spool and, as a JS twin, in Node.
-//! The two event traces must match exactly, and must also match a
-//! hand-written expectation (so both can't drift together).
+//! An optional comparison with Node (plan §8.1): each scenario runs in Spool
+//! and, as a JS twin, in Node, and both traces must match a hand-written
+//! expectation. Spool's semantics are defined by the plan and the reference
+//! model (tests/model.rs), not by Node. These scenarios are ones where the
+//! two agree, as a sanity check that Spool still behaves like a JS event
+//! loop. Where Spool deliberately differs (intervals, plan D7), there is no
+//! comparison.
 //!
 //! JS ↔ Spool mapping used by the twins:
 //!
@@ -11,9 +15,7 @@
 //! | `spawn(..)` then `handle.await`      | a deferred promise resolved at the end of the task, then `await promise` |
 //! | `yield_now().await`                  | `await null`                         |
 //! | `queue_microtask(f)`                 | `queueMicrotask(f)`                  |
-//! | `next_tick(f)`                       | `process.nextTick(f)`                |
 //! | `set_timeout(d, f)`                  | `setTimeout(f, ms)`                  |
-//! | `set_interval(d, f)` / `h.cancel()`  | `setInterval(f, ms)` / `clearInterval(h)` |
 //! | `sleep(d).await`                     | `await new Promise(r => setTimeout(r, ms))` |
 //! | `trace.log(x)`                       | `console.log(x)`                     |
 //!
@@ -21,8 +23,9 @@
 //! delays far enough apart (10ms or more) that real-time jitter can't
 //! reorder them, and never mix delays of 0 and 1ms (Node clamps 0 to 1ms).
 //!
-//! If `node` isn't on `PATH`, the Node half is skipped with a message, unless
-//! `SPOOL_REQUIRE_NODE=1` is set (as in CI), in which case it fails.
+//! The Node half is opt-in: it runs only with `SPOOL_COMPARE_NODE=1` (and
+//! `node` on `PATH`). Otherwise, as in CI, only the Spool half (the
+//! expectation) runs, so real-time jitter in Node can't fail a build.
 
 mod common;
 
@@ -52,15 +55,15 @@ fn timeout(t: &Trace, ms: u32, f: impl FnOnce(Trace) + 'static) {
 }
 
 fn run_node(script: &str) -> Option<Vec<String>> {
+    if std::env::var_os("SPOOL_COMPARE_NODE").is_none_or(|v| v != "1") {
+        return None;
+    }
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/node_parity")
         .join(script);
     let output = match Command::new("node").arg(&path).output() {
         Ok(output) => output,
         Err(err) => {
-            if std::env::var_os("SPOOL_REQUIRE_NODE").is_some() {
-                panic!("SPOOL_REQUIRE_NODE is set but `node` could not run: {err}");
-            }
             eprintln!("skipping Node parity check for {script}: `node` not available ({err})");
             return None;
         }
@@ -99,13 +102,7 @@ fn micro(t: &Trace, f: impl FnOnce(Trace) + 'static) {
     spool::queue_microtask(move || f(t));
 }
 
-/// Queues a tick that gets its own clone of the trace.
-fn tick(t: &Trace, f: impl FnOnce(Trace) + 'static) {
-    let t = t.clone();
-    spool::next_tick(move || f(t));
-}
-
-// ── M1 scenarios: tasks and yields ──────────────────────────────────────────
+// ── Tasks and yields ────────────────────────────────────────────────────────
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns a process")]
@@ -212,44 +209,25 @@ fn spawn_after_yield() {
     );
 }
 
-// ── M2 scenarios: ticks and microtasks ──────────────────────────────────────
+// ── Microtasks ──────────────────────────────────────────────────────────────
 
-/// Plan §8.2 scenario 1 (minus timers, which arrive in M3).
+/// Plan §8.2 scenario 1.
 #[test]
 #[cfg_attr(miri, ignore = "spawns a process")]
-fn sync_tick_microtask() {
+fn sync_microtask_timeout() {
     let trace = run_spool(async |t| {
+        timeout(&t, 0, |t| t.log("timeout"));
         micro(&t, |t| t.log("microtask"));
-        tick(&t, |t| t.log("tick"));
         t.log("sync");
     });
     check(
-        "sync_tick_microtask.js",
+        "sync_microtask_timeout.js",
         trace,
-        &["sync", "tick", "microtask"],
+        &["sync", "microtask", "timeout"],
     );
 }
 
-/// Plan §8.2 scenario 2.
-#[test]
-#[cfg_attr(miri, ignore = "spawns a process")]
-fn tick_inside_microtask() {
-    let trace = run_spool(async |t| {
-        micro(&t, |t| {
-            t.log("m1");
-            tick(&t, |t| t.log("t2 (queued by m1)"));
-        });
-        micro(&t, |t| t.log("m2"));
-        tick(&t, |t| t.log("t1"));
-    });
-    check(
-        "tick_inside_microtask.js",
-        trace,
-        &["t1", "m1", "m2", "t2 (queued by m1)"],
-    );
-}
-
-/// Plan §8.2 scenario 6.
+/// Plan §8.2 scenario 5.
 #[test]
 #[cfg_attr(miri, ignore = "spawns a process")]
 fn yield_microtask_interleave() {
@@ -269,23 +247,22 @@ fn yield_microtask_interleave() {
     );
 }
 
-/// Plan §8.2 scenario 9 (minus the timer callback, which arrives in M3).
+/// Plan §8.2 scenario 8 (microtask part).
 #[test]
 #[cfg_attr(miri, ignore = "spawns a process")]
 fn spawn_from_callbacks() {
     let trace = run_spool(async |t| {
-        tick(&t, |t| detach(&t, async |t| t.log("task from tick")));
         micro(&t, |t| detach(&t, async |t| t.log("task from microtask")));
         detach(&t, async |t| t.log("task from main"));
     });
     check(
         "spawn_from_callbacks.js",
         trace,
-        &["task from main", "task from tick", "task from microtask"],
+        &["task from main", "task from microtask"],
     );
 }
 
-/// Plan §8.2 scenario 10, with a sibling task that yields alongside the chain
+/// Plan §8.2 scenario 9, with a sibling task that yields alongside the chain
 /// so that every microtask hop is visible in the trace.
 #[test]
 #[cfg_attr(miri, ignore = "spawns a process")]
@@ -341,103 +318,22 @@ fn join_chain() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns a process")]
-fn tick_inside_tick() {
-    let trace = run_spool(async |t| {
-        tick(&t, |t| {
-            t.log("t1");
-            tick(&t, |t| t.log("t3 (queued by t1)"));
-        });
-        tick(&t, |t| t.log("t2"));
-        micro(&t, |t| t.log("m"));
-    });
-    check(
-        "tick_inside_tick.js",
-        trace,
-        &["t1", "t2", "t3 (queued by t1)", "m"],
-    );
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "spawns a process")]
-fn microtask_inside_tick() {
-    let trace = run_spool(async |t| {
-        tick(&t, |t| {
-            t.log("t1");
-            micro(&t, |t| t.log("m2 (queued by t1)"));
-        });
-        micro(&t, |t| t.log("m1"));
-    });
-    check(
-        "microtask_inside_tick.js",
-        trace,
-        &["t1", "m1", "m2 (queued by t1)"],
-    );
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "spawns a process")]
 fn main_yields() {
     let trace = run_spool(async |t| {
-        tick(&t, |t| t.log("t1"));
         micro(&t, |t| t.log("m1"));
         t.log("main before yield");
         spool::yield_now().await;
         t.log("main after yield");
-        tick(&t, |t| t.log("t2"));
         micro(&t, |t| t.log("m2"));
     });
     check(
         "main_yields.js",
         trace,
-        &[
-            "main before yield",
-            "t1",
-            "m1",
-            "main after yield",
-            "m2",
-            "t2",
-        ],
+        &["main before yield", "m1", "main after yield", "m2"],
     );
 }
 
-#[test]
-#[cfg_attr(miri, ignore = "spawns a process")]
-fn alternating_rounds() {
-    // Each microtask queues a tick and each tick queues a microtask, a few
-    // levels deep: exercises repeated rounds of the drain loop.
-    fn m(t: &Trace, depth: u32) {
-        micro(t, move |t| {
-            t.log(format!("m{depth}"));
-            if depth < 3 {
-                k(&t, depth + 1);
-                micro(&t, move |t| t.log(format!("m{depth}b")));
-            }
-        });
-    }
-    fn k(t: &Trace, depth: u32) {
-        tick(t, move |t| {
-            t.log(format!("t{depth}"));
-            if depth < 3 {
-                m(&t, depth + 1);
-                tick(&t, move |t| t.log(format!("t{depth}b")));
-            }
-        });
-    }
-    let trace = run_spool(async |t| {
-        m(&t, 0);
-        k(&t, 0);
-    });
-    check(
-        "alternating_rounds.js",
-        trace,
-        &[
-            "t0", "t0b", "m0", "m1", "m0b", "m1b", "t1", "t2", "t1b", "t2b", "m2", "m3", "m2b",
-            "t3",
-        ],
-    );
-}
-
-// ── M3 scenarios: timers ────────────────────────────────────────────────────
+// ── Timers ──────────────────────────────────────────────────────────────────
 
 /// The example from plan §2 (with delays spread out for real-time Node).
 #[test]
@@ -446,7 +342,6 @@ fn plan_example() {
     let trace = run_spool(async |t| {
         timeout(&t, 40, |t| t.log("timeout 40ms"));
         micro(&t, |t| t.log("microtask"));
-        tick(&t, |t| t.log("nextTick"));
         t.log("sync");
         let h = spool::spawn(async {
             spool::sleep(10 * MS).await;
@@ -457,41 +352,37 @@ fn plan_example() {
     check(
         "plan_example.js",
         trace,
-        &[
-            "sync",
-            "nextTick",
-            "microtask",
-            "joined: 42",
-            "timeout 40ms",
-        ],
+        &["sync", "microtask", "joined: 42", "timeout 40ms"],
     );
 }
 
-/// Plan §8.2 scenario 3.
+/// Plan §8.2 scenario 2.
 #[test]
 #[cfg_attr(miri, ignore = "spawns a process")]
-fn queues_drain_between_timers() {
+fn microtasks_drain_between_timers() {
     let trace = run_spool(async |t| {
         timeout(&t, 0, |t| {
             t.log("timer 1");
-            micro(&t, |t| t.log("microtask from timer 1"));
-            tick(&t, |t| t.log("tick from timer 1"));
+            micro(&t, |t| {
+                t.log("microtask from timer 1");
+                micro(&t, |t| t.log("nested microtask"));
+            });
         });
         timeout(&t, 0, |t| t.log("timer 2"));
     });
     check(
-        "queues_drain_between_timers.js",
+        "microtasks_drain_between_timers.js",
         trace,
         &[
             "timer 1",
-            "tick from timer 1",
             "microtask from timer 1",
+            "nested microtask",
             "timer 2",
         ],
     );
 }
 
-/// Plan §8.2 scenario 4.
+/// Plan §8.2 scenario 3.
 #[test]
 #[cfg_attr(miri, ignore = "spawns a process")]
 fn self_rearming_timer() {
@@ -510,7 +401,7 @@ fn self_rearming_timer() {
     check("self_rearming_timer.js", trace, &["a1", "b", "a2", "a3"]);
 }
 
-/// Plan §8.2 scenario 5.
+/// Plan §8.2 scenario 4.
 #[test]
 #[cfg_attr(miri, ignore = "spawns a process")]
 fn timer_deadline_order() {
@@ -527,59 +418,23 @@ fn timer_deadline_order() {
 }
 
 /// Plan §8.2 scenario 7.
-///
-/// Node schedules each interval tick from when the previous one actually ran,
-/// so late timers (up to ~16ms each on Windows) push later ticks back. The
-/// deadlines are spread out so that the order survives several late timers:
-/// `i2` lands in 200..~232ms, between `t150` and `t260`.
 #[test]
 #[cfg_attr(miri, ignore = "spawns a process")]
-fn interval_with_timeouts() {
-    let trace = run_spool(async |t| {
-        let ti = t.clone();
-        let mut n = 0;
-        spool::set_interval(100 * MS, move |h| {
-            n += 1;
-            ti.log(format!("i{n}"));
-            if n == 3 {
-                h.cancel();
-            }
-        });
-        timeout(&t, 150, |t| t.log("t150"));
-        timeout(&t, 260, |t| t.log("t260"));
-    });
-    check(
-        "interval_with_timeouts.js",
-        trace,
-        &["i1", "t150", "i2", "t260", "i3"],
-    );
-}
-
-/// Plan §8.2 scenario 8.
-#[test]
-#[cfg_attr(miri, ignore = "spawns a process")]
-fn timeout_microtask_tick_timeout() {
+fn timeout_microtask_timeout() {
     let trace = run_spool(async |t| {
         timeout(&t, 0, |t| {
             t.log("A");
             micro(&t, |t| {
                 t.log("M");
-                tick(&t, |t| {
-                    t.log("T");
-                    timeout(&t, 0, |t| t.log("B"));
-                });
+                timeout(&t, 0, |t| t.log("B"));
             });
         });
         timeout(&t, 0, |t| t.log("C"));
     });
-    check(
-        "timeout_microtask_tick_timeout.js",
-        trace,
-        &["A", "M", "T", "C", "B"],
-    );
+    check("timeout_microtask_timeout.js", trace, &["A", "M", "C", "B"]);
 }
 
-/// Plan §8.2 scenario 9 (timer part).
+/// Plan §8.2 scenario 8 (timer part).
 #[test]
 #[cfg_attr(miri, ignore = "spawns a process")]
 fn spawn_from_timer() {

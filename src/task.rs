@@ -205,8 +205,8 @@ where
 /// - Polling the handle again after it returned panics.
 ///
 /// If the task panics and its handle is dropped without the panic being
-/// observed, the panic unwinds out of `run` / `block_on`, like an unhandled
-/// promise rejection crashing Node.
+/// observed, the panic unwinds out of `run` / `block_on`, rather than being
+/// silently swallowed.
 ///
 /// # Example
 ///

@@ -1,11 +1,12 @@
 # Spool — Design & Plan
 
-> Status: **Design v4.** v1 (milestones M0–M6) is implemented. v4 changes
-> direction: Spool is *inspired by* the JavaScript event loop, not a
-> reimplementation of Node's, and it targets native and WASM equally. §11.2
-> lists what v4 changed, and §12 has the milestones that bring the code in
-> line (M7 onward). Decisions are tagged `D#`; a decision marked
-> *(revised in v4)* is not implemented yet.
+> Status: **Design v4.** v1 (milestones M0–M6) is implemented, and M7
+> brought it in line with v4's semantics. v4 changes direction: Spool is
+> *inspired by* the JavaScript event loop, not a reimplementation of Node's,
+> and it targets native and WASM equally. §11.2 lists what v4 changed, and
+> §12 has the milestones (M8 onward is the WASM work). Decisions are tagged
+> `D#`; a decision marked *(revised in v4)* or *(new in v4)* says what is
+> built so far.
 
 Spool is a small, single-threaded Rust async executor whose scheduling model
 is inspired by the JavaScript event loop: woken tasks run as FIFO microtasks,
@@ -146,10 +147,10 @@ the handle (§5).
 fire-and-forget work. The future forms are what idiomatic Rust code will
 mostly use. A callback that needs to do async work can call `spawn` inside it.
 
-**D12. No `next_tick`** *(new in v4)*. v1 had a second, higher-priority
+**D12. No `next_tick`** *(new in v4; done in M7)*. v1 had a second, higher-priority
 queue modeled on Node's `process.nextTick`. It exists only in Node, it is
 most of the complexity in the drain rules, and it has no browser
-counterpart. v4 removes it (M7). Code that wants "run this before other
+counterpart. M7 removed it. Code that wants "run this before other
 queued work" can usually restructure, or run it inline.
 
 ---
@@ -207,7 +208,7 @@ fn drain_microtasks():
 ```
 
 *(v1 also had a tick queue, drained before microtasks and again whenever a
-microtask queued a tick. It goes away with `next_tick` in M7, D12.)*
+microtask queued a tick. It went away with `next_tick` in M7, D12.)*
 
 ### 3.3 One step of the loop
 
@@ -268,7 +269,8 @@ thread. That works natively but not in the browser.)*
   the past, via `sleep_until`, sorts to the top of the heap. It is set aside
   for the rest of the phase so that it can't block older due timers behind
   it.)*
-- **D7. Intervals don't drift, and skip missed ticks** *(revised in v4)*.
+- **D7. Intervals don't drift, and skip missed ticks** *(revised in v4;
+  done in M7)*.
   An interval created at `t0` with period `p` is due at `t0 + p`,
   `t0 + 2p`, and so on. Each tick re-arms at the *previous deadline* + `p`,
   so neither the time a callback takes nor a late timers phase shifts the
@@ -276,9 +278,10 @@ thread. That works natively but not in the browser.)*
   already passed, those ticks are **skipped**: the interval re-arms at the
   first `t0 + k·p` after now, and fires once, not in a burst. (This is
   Tokio's `MissedTickBehavior::Skip`.) `set_interval` and `interval()` behave
-  the same way. `interval().tick()` completes immediately the first time.
-  *(v1 copied Node instead: it re-armed from the timers phase's start time,
-  so late phases made the schedule drift. M7 changes it.)*
+  the same way. `interval().tick()` completes immediately the first time,
+  and each tick returns the time it was scheduled for. *(v1 copied Node
+  instead: it re-armed from the timers phase's start time, so late phases
+  made the schedule drift. M7 changed it.)*
 - `set_interval`'s callback receives `&TimerHandle`, so it can cancel itself
   without the `Rc<Cell<Option<Handle>>>` workaround.
 - A zero `period` panics, because it would make an infinite loop of
@@ -617,21 +620,21 @@ can't slip through. Runtime dependencies stay at zero. These test-only
 **dev-dependencies** are approved: `proptest`, `trybuild`, and
 `static_assertions`.
 
-**D15. The reference model is the oracle** *(revised in v4)*. Spool's
+**D15. The reference model is the oracle** *(revised in v4; done in M7)*. Spool's
 behavior is defined by this plan (§3) and checked against the reference model
 in `tests/model.rs`: a small, obviously-correct simulator of §3, compared
 with Spool on random programs by `proptest`. It runs everywhere, with no
 external tools and no real time. Node is no longer the definition of correct.
 *(v1 required Node in CI, and fuzzed random programs against it, skipping
-programs where Node's internal timer lists would decide the order. M7 moves
-that coverage into the model, then removes the Node fuzzer.)*
+programs where Node's internal timer lists would decide the order. M7 moved
+that coverage into the model, and removed the Node fuzzer.)*
 
 ### 8.1 Layers
 
 | Layer | Location | What it covers |
 |---|---|---|
 | **Unit tests** | `src/**` `#[cfg(test)]` | Slab generations, timer heap ordering and cancellation, queue drains, waker dedupe, the strong-count logic |
-| **Reference-model tests** | `tests/model.rs` | The oracle (D15). Random trees of `queue_microtask` / `set_timeout` / `set_interval` / cancel / `spawn` / `abort` / `yield_now` / `sleep` / join / panic operations, run on Spool (with a `MockClock`) and on the model; the traces must match. *(M7 adds intervals and timer cancellation, which only the Node fuzzer covered in v1.)* |
+| **Reference-model tests** | `tests/model.rs` | The oracle (D15). Random trees of `queue_microtask` / `set_timeout` / `set_interval` / cancel / `spawn` / `abort` / `yield_now` / `sleep` / join / panic operations, run on Spool (with a `MockClock`) and on the model; the traces must match. A `Busy(ms)` operation advances the clock mid-callback, to exercise late timers and skipped interval runs. *(M7 added intervals, timer cancellation, and `Busy`; v1 covered the first two only in the Node fuzzer.)* |
 | **Ordering tests** | `tests/ordering.rs` | Hand-written scenarios with exact expected traces (§8.2) |
 | **Timer tests** | `tests/timers.rs` | `MockClock`-driven checks of deadlines, interval schedules and skipped ticks, timeouts, and zero durations; no real sleeps |
 | **Cancellation tests** | `tests/abort.rs` and others | Every row of the §5 table, plus edge cases (§8.3) |
@@ -643,7 +646,7 @@ that coverage into the model, then removes the Node fuzzer.)*
 | **Type-level tests** | `tests/types.rs` + `trybuild` | `!Send` futures compile; `JoinHandle`, `TimerHandle`, and `AbortHandle` are `!Send` (static assertions); misuse that should not compile doesn't |
 | **Stress tests** | `tests/stress.rs` (`#[ignore]` by default) | 1M spawned tasks, 100k timers with random cancellation, deep microtask and join chains; checks for no stack growth and roughly linear time |
 | **Doc tests** | rustdoc | Every public item has a runnable example |
-| **Node comparison** (optional) | `tests/node_parity.rs` | A handful of §8.2 scenarios also run as JS in Node, as a sanity check that Spool's model is still recognizably JS-like. Skipped when Node isn't installed; not required in CI. A scenario where Spool deliberately differs (intervals, D7) is not compared. |
+| **Node comparison** (optional) | `tests/node_parity.rs` | A handful of scenarios also run as JS in Node, as a sanity check that Spool's model is still recognizably JS-like. Opt-in with `SPOOL_COMPARE_NODE=1`; otherwise (and in CI) only the Spool half runs. A scenario where Spool deliberately differs (intervals, D7) is not compared. |
 | **WASM** (M8–M10) | CI | `cargo check` on WASM targets; the suite under `wasm-bindgen-test` (browser) and wasmtime (WASI) |
 
 ### 8.2 Core ordering scenarios
@@ -686,8 +689,8 @@ that coverage into the model, then removes the Node fuzzer.)*
   isn't required to pass (and skips the `trybuild` comparison, whose expected
   output pins stable's wording).
 - `cargo test`, then the stress tests on a weekly schedule.
-- The optional Node comparison runs when `node` is on `PATH`. CI doesn't
-  require it.
+- The optional Node comparison runs with `SPOOL_COMPARE_NODE=1`. CI doesn't
+  run it.
 - `cargo clippy -D warnings`, `cargo fmt --check`, and `cargo doc -D warnings`.
 - Coverage with `cargo-llvm-cov`: CI requires ≥ 90% of lines.
 - Miri runs on the full suite. It becomes essential once `unsafe` lands (§9.6).
@@ -826,7 +829,7 @@ that the hot paths are the ones every target shares.
 | M4 | Cancellation & panics | done | `abort`, `AbortHandle`, `abort_on_drop`, `try_join`, the panic model, poisoning |
 | M5 | Liveness & threads | done | `KeepAlive`, stall-detection hardening, remote wakes, the Node fuzzer |
 | M6 | Polish | done | Rustdoc guide, examples, stress tests, benchmarks (§9.6 baseline), coverage gate |
-| M7 | Realign with v4 | | Remove `next_tick` and the tick queue (D12), from the API, the model, tests, docs, and examples. New interval semantics (D7) for `set_interval` and `interval()`, with model and timer tests for skipped ticks. Extend the reference model with intervals and timer cancellation (D15), then remove the Node fuzzer; trim `node_parity` to the optional comparison and drop `SPOOL_REQUIRE_NODE` and the Node install from CI. Reword the crate docs, README, and examples from "matches Node" to "inspired by JS". Update the "§8.2 scenario N" references in the tests to the v4 numbering. |
+| M7 | Realign with v4 | done | Remove `next_tick` and the tick queue (D12), from the API, the model, tests, docs, and examples. New interval semantics (D7) for `set_interval` and `interval()`, with model and timer tests for skipped ticks. Extend the reference model with intervals and timer cancellation (D15), then remove the Node fuzzer; trim `node_parity` to the optional comparison and drop `SPOOL_REQUIRE_NODE` and the Node install from CI. Reword the crate docs, README, and examples from "matches Node" to "inspired by JS". Update the "§8.2 scenario N" references in the tests to the v4 numbering. |
 | M8 | Non-blocking core | | Split `drive()` into `step()` (D5) and a native driver; make main a resumable task; per-target default clock (D13); per-target panic docs (§6); `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1` in CI. Settle the public-`step()` question (§10). No behavior change on native: the full suite must pass unchanged. |
 | M9 | Browser | | Feature `browser`: `PerformanceClock`, the host-callback driver (D14), `browser::start`, an example page, and the suite (minus threads and panics) under `wasm-bindgen-test` in a headless browser in CI. |
 | M10 | WASI | | Make the suite (minus threads) pass under wasmtime on `wasm32-wasip1` (and `-wasip2` if it is no extra work), adding a WASI driver only if the native one doesn't work there; add it to CI. |

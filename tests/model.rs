@@ -1,17 +1,16 @@
 //! Reference-model tests: `proptest` generates random scheduling programs,
 //! and each one is run (a) on Spool and (b) on a tiny, obviously-correct
 //! simulator of the event-loop semantics in plan §3. The traces must match.
+//! The model is Spool's correctness oracle (plan D15).
 //!
-//! Programs mix ticks, microtasks, timers, spawned tasks, yields, sleeps,
-//! joins, aborts, and panics. Spool runs them on a `MockClock`, and the model
-//! keeps its own virtual time, so timers are deterministic.
+//! Programs mix microtasks, one-shot timers, intervals, timer cancellation,
+//! slow callbacks (which move the clock forward), spawned tasks, yields,
+//! sleeps, joins, aborts, and panics. Spool runs them on a `MockClock`, and
+//! the model keeps its own virtual time, so timers are deterministic.
 //!
 //! A panic in a joined child is observed by its parent (`try_join`); any
 //! other panic crashes the run (plan §6), and the traces must match up to
 //! the crash.
-//!
-//! This runs without Node, so it covers machines where Node isn't installed.
-//! (Randomized differential testing against real Node is milestone M5.)
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -29,12 +28,21 @@ use proptest::prelude::*;
 enum Op {
     /// Record an event. Ids are assigned after generation, in tree order.
     Log(u32),
-    /// `next_tick` a callback that runs these ops.
-    Tick(Vec<Op>),
     /// `queue_microtask` a callback that runs these ops.
     Micro(Vec<Op>),
-    /// `set_timeout` (delay in ms) a callback that runs these ops.
-    Timer(u64, Vec<Op>),
+    /// `set_timeout` (delay in ms) a callback that runs these ops. The timer
+    /// slot (assigned after generation, in tree order) lets `Cancel` refer
+    /// to it.
+    Timer(u32, u64, Vec<Op>),
+    /// `set_interval` (period in ms) a callback that runs these ops, and
+    /// cancels itself after this many runs.
+    Interval(u32, u64, u32, Vec<Op>),
+    /// Cancel the timer or interval created by `Timer(slot, ..)` /
+    /// `Interval(slot, ..)`, if it has been created.
+    Cancel(u32),
+    /// Be "slow": advance the clock by this many ms, as if this code took
+    /// that long. Timers that become due wait for the next timers phase.
+    Busy(u64),
     /// `spawn` a detached task. The slot number (assigned after generation,
     /// in tree order) lets `Abort` refer to it.
     Spawn(u32, Body),
@@ -69,6 +77,7 @@ struct Body(Rc<Vec<Step>>);
 struct Numbering {
     log: u32,
     slot: u32,
+    timer: u32,
 }
 
 fn number_ops(ops: &mut [Op], next: &mut Numbering) {
@@ -78,13 +87,18 @@ fn number_ops(ops: &mut [Op], next: &mut Numbering) {
                 *id = next.log;
                 next.log += 1;
             }
-            Op::Tick(ops) | Op::Micro(ops) | Op::Timer(_, ops) => number_ops(ops, next),
+            Op::Micro(ops) => number_ops(ops, next),
+            Op::Timer(slot, _, ops) | Op::Interval(slot, _, _, ops) => {
+                *slot = next.timer;
+                next.timer += 1;
+                number_ops(ops, next);
+            }
             Op::Spawn(slot, body) => {
                 *slot = next.slot;
                 next.slot += 1;
                 number_body(body, next);
             }
-            Op::Abort(_) => {}
+            Op::Cancel(_) | Op::Busy(_) | Op::Abort(_) => {}
         }
     }
 }
@@ -104,6 +118,11 @@ fn number_body(body: &mut Body, next: &mut Numbering) {
 /// Small delays, so that equal deadlines (FIFO ordering) are common.
 fn delay() -> impl Strategy<Value = u64> {
     prop_oneof![Just(0), Just(1), Just(2), Just(5)]
+}
+
+/// Interval periods: non-zero, and small enough to interleave with delays.
+fn period() -> impl Strategy<Value = u64> {
+    prop_oneof![Just(1), Just(2), Just(5)]
 }
 
 fn body_strategy(op: BoxedStrategy<Op>, join_depth: u32) -> BoxedStrategy<Body> {
@@ -132,10 +151,13 @@ fn op_strategy() -> BoxedStrategy<Op> {
             let inner = inner.boxed();
             let ops = || prop::collection::vec(inner.clone(), 0..4);
             prop_oneof![
-                2 => Just(Op::Log(0)),
-                2 => ops().prop_map(Op::Tick),
-                2 => ops().prop_map(Op::Micro),
-                2 => (delay(), ops()).prop_map(|(ms, ops)| Op::Timer(ms, ops)),
+                3 => Just(Op::Log(0)),
+                3 => ops().prop_map(Op::Micro),
+                3 => (delay(), ops()).prop_map(|(ms, ops)| Op::Timer(0, ms, ops)),
+                2 => (period(), 1..4_u32, ops())
+                    .prop_map(|(p, runs, ops)| Op::Interval(0, p, runs, ops)),
+                1 => (0..4_u32).prop_map(Op::Cancel),
+                1 => prop_oneof![Just(1), Just(3), Just(7)].prop_map(Op::Busy),
                 1 => body_strategy(inner.clone(), 1).prop_map(|body| Op::Spawn(0, body)),
                 1 => (0..4_u32).prop_map(Op::Abort),
             ]
@@ -154,12 +176,14 @@ fn program_strategy() -> impl Strategy<Value = Body> {
 
 type Log = Rc<RefCell<Vec<u32>>>;
 
-/// What a running program shares: its trace, and the abort handles of its
-/// spawned tasks by slot.
-#[derive(Clone, Default)]
+/// What a running program shares: its trace, the clock, and the handles of
+/// its spawned tasks and timers by slot.
+#[derive(Clone)]
 struct Ctx {
     log: Log,
-    handles: Rc<RefCell<HashMap<u32, spool::AbortHandle>>>,
+    clock: spool::MockClock,
+    tasks: Rc<RefCell<HashMap<u32, spool::AbortHandle>>>,
+    timers: Rc<RefCell<HashMap<u32, spool::TimerHandle>>>,
 }
 
 const MODEL_PANIC: &str = "model panic";
@@ -188,27 +212,41 @@ fn spool_ops(ops: &[Op], ctx: &Ctx) {
     for op in ops {
         match op {
             Op::Log(id) => ctx.log.borrow_mut().push(*id),
-            Op::Tick(ops) => {
-                let (ops, ctx) = (ops.clone(), ctx.clone());
-                spool::next_tick(move || spool_ops(&ops, &ctx));
-            }
             Op::Micro(ops) => {
                 let (ops, ctx) = (ops.clone(), ctx.clone());
                 spool::queue_microtask(move || spool_ops(&ops, &ctx));
             }
-            Op::Timer(delay, ops) => {
-                let (ops, ctx) = (ops.clone(), ctx.clone());
-                spool::set_timeout(ms(*delay), move || spool_ops(&ops, &ctx));
+            Op::Timer(slot, delay, ops) => {
+                let (ops, c) = (ops.clone(), ctx.clone());
+                let handle = spool::set_timeout(ms(*delay), move || spool_ops(&ops, &c));
+                ctx.timers.borrow_mut().insert(*slot, handle);
             }
+            Op::Interval(slot, period, runs, ops) => {
+                let (ops, c) = (ops.clone(), ctx.clone());
+                let mut left = *runs;
+                let handle = spool::set_interval(ms(*period), move |me| {
+                    spool_ops(&ops, &c);
+                    left -= 1;
+                    if left == 0 {
+                        me.cancel();
+                    }
+                });
+                ctx.timers.borrow_mut().insert(*slot, handle);
+            }
+            Op::Cancel(slot) => {
+                let handle = ctx.timers.borrow().get(slot).cloned();
+                if let Some(handle) = handle {
+                    handle.cancel();
+                }
+            }
+            Op::Busy(n) => ctx.clock.advance(ms(*n)),
             Op::Spawn(slot, body) => {
                 let handle = spool::spawn(spool_body(body.clone(), ctx.clone()));
-                ctx.handles
-                    .borrow_mut()
-                    .insert(*slot, handle.abort_handle());
+                ctx.tasks.borrow_mut().insert(*slot, handle.abort_handle());
                 drop(handle); // Detached.
             }
             Op::Abort(slot) => {
-                let handle = ctx.handles.borrow().get(slot).cloned();
+                let handle = ctx.tasks.borrow().get(slot).cloned();
                 if let Some(handle) = handle {
                     handle.abort();
                 }
@@ -243,10 +281,14 @@ fn spool_body(body: Body, ctx: Ctx) -> Pin<Box<dyn Future<Output = ()>>> {
 
 fn run_on_spool(program: &Body) -> Outcome {
     quiet_model_panics();
-    let ctx = Ctx::default();
-    let rt = spool::Runtime::builder()
-        .clock(spool::MockClock::new())
-        .build();
+    let clock = spool::MockClock::new();
+    let ctx = Ctx {
+        log: Log::default(),
+        clock: clock.clone(),
+        tasks: Rc::default(),
+        timers: Rc::default(),
+    };
+    let rt = spool::Runtime::builder().clock(clock).build();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rt.run(spool_body(program.clone(), ctx.clone()));
     }));
@@ -279,23 +321,57 @@ struct Task {
     holds_panic: bool,
 }
 
+/// A microtask.
 enum Job {
     Run(Vec<Op>),
     Resume(usize),
 }
 
+/// What a timer does when it fires. Timers have a model-wide id, so that a
+/// cancel reaches the right one.
+enum TimerJob {
+    /// A `set_timeout` callback.
+    Once(usize, Vec<Op>),
+    /// A `set_interval` (its state is in `Model::intervals`).
+    Interval(usize),
+    /// A sleeping task's wake-up.
+    Wake(usize),
+}
+
+struct IntervalState {
+    period: u64,
+    runs_left: u32,
+    ops: Vec<Op>,
+    /// The deadline it last fired for: the next is on the same schedule.
+    deadline: u64,
+}
+
+/// The next deadline on an interval's fixed schedule (`prev + k·period`):
+/// the first that isn't before `now`. Missed runs are skipped (plan D7).
+fn next_interval_deadline(prev: u64, period: u64, now: u64) -> u64 {
+    let mut next = prev + period;
+    while next < now {
+        next += period;
+    }
+    next
+}
+
 #[derive(Default)]
 struct Model {
-    ticks: VecDeque<Vec<Op>>,
     microtasks: VecDeque<Job>,
     /// Timers keyed by `(deadline in ms, seq)`, so iteration order is firing
     /// order.
-    timers: BTreeMap<(u64, u64), Job>,
+    timers: BTreeMap<(u64, u64), TimerJob>,
     next_seq: u64,
     now: u64,
     tasks: Vec<Task>,
-    /// Spawn slot → task id.
+    /// Spawn slot → task id (the latest spawn for that slot).
     slots: HashMap<u32, usize>,
+    /// Timer slot → timer id (the latest timer for that slot).
+    timer_slots: HashMap<u32, usize>,
+    next_timer: usize,
+    /// Live intervals, by timer id.
+    intervals: HashMap<usize, IntervalState>,
     /// The task being resumed right now.
     current: Option<usize>,
     /// An unobserved panic: the run stops after the current job.
@@ -316,23 +392,48 @@ impl Model {
         self.tasks.len() - 1
     }
 
-    fn add_timer(&mut self, delay: u64, job: Job) {
-        self.add_timer_at(self.now + delay, job);
-    }
-
-    fn add_timer_at(&mut self, deadline: u64, job: Job) {
+    fn add_timer_at(&mut self, deadline: u64, job: TimerJob) {
         let seq = self.next_seq;
         self.next_seq += 1;
         self.timers.insert((deadline, seq), job);
+    }
+
+    fn new_timer(&mut self, slot: u32) -> usize {
+        let id = self.next_timer;
+        self.next_timer += 1;
+        self.timer_slots.insert(slot, id);
+        id
     }
 
     fn ops(&mut self, ops: &[Op]) {
         for op in ops {
             match op {
                 Op::Log(id) => self.log.push(*id),
-                Op::Tick(ops) => self.ticks.push_back(ops.clone()),
                 Op::Micro(ops) => self.microtasks.push_back(Job::Run(ops.clone())),
-                Op::Timer(delay, ops) => self.add_timer(*delay, Job::Run(ops.clone())),
+                Op::Timer(slot, delay, ops) => {
+                    let id = self.new_timer(*slot);
+                    self.add_timer_at(self.now + delay, TimerJob::Once(id, ops.clone()));
+                }
+                Op::Interval(slot, period, runs, ops) => {
+                    let id = self.new_timer(*slot);
+                    let deadline = self.now + period;
+                    self.intervals.insert(
+                        id,
+                        IntervalState {
+                            period: *period,
+                            runs_left: *runs,
+                            ops: ops.clone(),
+                            deadline,
+                        },
+                    );
+                    self.add_timer_at(deadline, TimerJob::Interval(id));
+                }
+                Op::Cancel(slot) => {
+                    if let Some(&id) = self.timer_slots.get(slot) {
+                        self.cancel_timer(id);
+                    }
+                }
+                Op::Busy(n) => self.now += n,
                 Op::Spawn(slot, body) => {
                     let id = self.spawn(body.clone(), None);
                     self.slots.insert(*slot, id);
@@ -345,6 +446,14 @@ impl Model {
                 }
             }
         }
+    }
+
+    fn cancel_timer(&mut self, id: usize) {
+        self.intervals.remove(&id);
+        self.timers.retain(|_, job| match job {
+            TimerJob::Once(t, _) | TimerJob::Interval(t) => *t != id,
+            TimerJob::Wake(_) => true,
+        });
     }
 
     fn abort(&mut self, id: usize) {
@@ -363,7 +472,7 @@ impl Model {
     /// it was holding becomes unobserved.
     fn kill(&mut self, id: usize) {
         self.timers
-            .retain(|_, job| !matches!(job, Job::Resume(t) if *t == id));
+            .retain(|_, job| !matches!(job, TimerJob::Wake(t) if *t == id));
         if self.tasks[id].holds_panic {
             self.crashed = true;
         }
@@ -409,11 +518,11 @@ impl Model {
                     return true;
                 }
                 Step::Sleep(delay) => {
-                    self.add_timer(*delay, Job::Resume(id));
+                    self.add_timer_at(self.now + delay, TimerJob::Wake(id));
                     return true;
                 }
                 Step::SleepUntilPast(back) => {
-                    self.add_timer_at(self.now.saturating_sub(*back), Job::Resume(id));
+                    self.add_timer_at(self.now.saturating_sub(*back), TimerJob::Wake(id));
                     return true;
                 }
                 Step::Join(child) => {
@@ -422,8 +531,8 @@ impl Model {
                     return true;
                 }
                 Step::Panic => {
-                    // Like a rejection: delivered to a live joiner (a
-                    // microtask hop), or else unobserved.
+                    // Delivered to a live joiner (a microtask hop), or else
+                    // unobserved.
                     self.tasks[id].finished = true;
                     match self.live_joiner(self.tasks[id].joiner) {
                         Some(joiner) => {
@@ -438,28 +547,39 @@ impl Model {
         }
     }
 
-    /// Node's `processTicksAndRejections`. Stops after the job that crashed.
+    /// Runs every microtask, including ones queued meanwhile. Stops after
+    /// the job that crashed.
     fn drain(&mut self) {
-        loop {
-            while let Some(ops) = self.ticks.pop_front() {
-                self.ops(&ops);
-                if self.crashed {
-                    return;
-                }
+        while let Some(job) = self.microtasks.pop_front() {
+            match job {
+                Job::Run(ops) => self.ops(&ops),
+                Job::Resume(id) => self.resume(id),
             }
-            while let Some(job) = self.microtasks.pop_front() {
-                match job {
-                    Job::Run(ops) => self.ops(&ops),
-                    Job::Resume(id) => self.resume(id),
-                }
-                if self.crashed {
-                    return;
-                }
-            }
-            if self.ticks.is_empty() {
+            if self.crashed {
                 return;
             }
         }
+    }
+
+    /// Runs interval `id`'s callback, then re-arms it on its schedule unless
+    /// it was cancelled (by itself, or because its runs are used up).
+    fn fire_interval(&mut self, id: usize) {
+        let Some(state) = self.intervals.get(&id) else {
+            return;
+        };
+        let ops = state.ops.clone();
+        self.ops(&ops);
+        let Some(state) = self.intervals.get_mut(&id) else {
+            return; // It cancelled itself.
+        };
+        state.runs_left -= 1;
+        if state.runs_left == 0 {
+            self.intervals.remove(&id);
+            return;
+        }
+        state.deadline = next_interval_deadline(state.deadline, state.period, self.now);
+        let deadline = state.deadline;
+        self.add_timer_at(deadline, TimerJob::Interval(id));
     }
 
     /// Fires every timer due at the phase's start time that existed when the
@@ -480,9 +600,10 @@ impl Model {
             };
             fired = true;
             match self.timers.remove(&key).unwrap() {
-                Job::Run(ops) => self.ops(&ops),
+                TimerJob::Once(_, ops) => self.ops(&ops),
+                TimerJob::Interval(id) => self.fire_interval(id),
                 // A sleep's timer wakes its task: a microtask.
-                Job::Resume(id) => self.microtasks.push_back(Job::Resume(id)),
+                TimerJob::Wake(id) => self.microtasks.push_back(Job::Resume(id)),
             }
             if self.crashed {
                 return true;
@@ -496,7 +617,7 @@ impl Model {
 
     fn run(program: &Body) -> Outcome {
         let mut model = Model::default();
-        // Main's first poll is the "script", run synchronously. Main has no
+        // Main's first poll runs directly, as a macrotask. Main has no
         // joiner, so a panic in main crashes the run, as in Spool.
         let main = model.spawn(program.clone(), None);
         model.resume(main);
@@ -554,14 +675,13 @@ mod model_sanity {
     }
 
     #[test]
-    fn tick_inside_microtask() {
-        // micro(m: log 0; tick(log 1)); micro(log 2); tick(log 3)
+    fn microtask_queued_by_a_microtask_runs_after_earlier_ones() {
+        // micro(log 0; micro(log 1)); micro(log 2)
         let program = body(vec![Step::Ops(vec![
-            Op::Micro(vec![Op::Log(0), Op::Tick(vec![Op::Log(1)])]),
+            Op::Micro(vec![Op::Log(0), Op::Micro(vec![Op::Log(1)])]),
             Op::Micro(vec![Op::Log(2)]),
-            Op::Tick(vec![Op::Log(3)]),
         ])]);
-        check(&program, &[3, 0, 2, 1]);
+        check(&program, &[0, 2, 1]);
     }
 
     #[test]
@@ -584,11 +704,11 @@ mod model_sanity {
     }
 
     #[test]
-    fn queues_drain_between_timers() {
+    fn microtasks_drain_between_timers() {
         // timer(0: log 0; micro(log 1)); timer(0: log 2)
         let program = body(vec![Step::Ops(vec![
-            Op::Timer(0, vec![Op::Log(0), Op::Micro(vec![Op::Log(1)])]),
-            Op::Timer(0, vec![Op::Log(2)]),
+            Op::Timer(0, 0, vec![Op::Log(0), Op::Micro(vec![Op::Log(1)])]),
+            Op::Timer(1, 0, vec![Op::Log(2)]),
         ])]);
         check(&program, &[0, 1, 2]);
     }
@@ -597,8 +717,8 @@ mod model_sanity {
     fn timer_armed_mid_phase_waits_for_the_next_phase() {
         // timer(0: log 0; timer(0: log 1)); timer(0: log 2)
         let program = body(vec![Step::Ops(vec![
-            Op::Timer(0, vec![Op::Log(0), Op::Timer(0, vec![Op::Log(1)])]),
-            Op::Timer(0, vec![Op::Log(2)]),
+            Op::Timer(0, 0, vec![Op::Log(0), Op::Timer(1, 0, vec![Op::Log(1)])]),
+            Op::Timer(2, 0, vec![Op::Log(2)]),
         ])]);
         check(&program, &[0, 2, 1]);
     }
@@ -609,8 +729,8 @@ mod model_sanity {
         // registered after the sleep by a microtask.
         let program = body(vec![
             Step::Ops(vec![
-                Op::Timer(5, vec![Op::Log(0)]),
-                Op::Micro(vec![Op::Timer(5, vec![Op::Log(2)])]),
+                Op::Timer(0, 5, vec![Op::Log(0)]),
+                Op::Micro(vec![Op::Timer(1, 5, vec![Op::Log(2)])]),
             ]),
             Step::Sleep(5),
             Step::Ops(vec![Op::Log(1)]),
@@ -626,12 +746,64 @@ mod model_sanity {
     }
 
     #[test]
+    fn intervals_interleave_with_timeouts() {
+        // interval(2, 3 runs: log 0); timer(3: log 1); timer(5: log 2)
+        // Runs at 2, 4, 6; timeouts at 3 and 5.
+        let program = body(vec![Step::Ops(vec![
+            Op::Interval(0, 2, 3, vec![Op::Log(0)]),
+            Op::Timer(1, 3, vec![Op::Log(1)]),
+            Op::Timer(2, 5, vec![Op::Log(2)]),
+        ])]);
+        check(&program, &[0, 1, 0, 2, 0]);
+    }
+
+    #[test]
+    fn a_slow_interval_skips_runs_and_keeps_its_schedule() {
+        // interval(2, 3 runs: log 0; busy 5): runs at 2 (until 7), then the
+        // 4 and 6 runs are skipped: 8 (until 13), then 14. A timer at 9
+        // shows where the schedule is: it fires after the 8 run.
+        let program = body(vec![Step::Ops(vec![
+            Op::Interval(0, 2, 3, vec![Op::Log(0), Op::Busy(5)]),
+            Op::Timer(1, 9, vec![Op::Log(1)]),
+        ])]);
+        check(&program, &[0, 0, 1, 0]);
+    }
+
+    #[test]
+    fn cancelling_timers_and_intervals() {
+        // timer#0(1: log 0); interval#1(1, 3 runs: log 1); timer#2(2: cancel
+        // #0 (already fired), cancel #1 (after one run))
+        let program = body(vec![Step::Ops(vec![
+            Op::Timer(0, 1, vec![Op::Log(0)]),
+            Op::Interval(1, 1, 3, vec![Op::Log(1)]),
+            Op::Timer(2, 2, vec![Op::Cancel(0), Op::Cancel(1), Op::Log(2)]),
+        ])]);
+        // At 1: log 0, log 1. At 2: the interval was re-armed for 2 after
+        // timer#2, so timer#2 fires first and cancels it.
+        check(&program, &[0, 1, 2]);
+    }
+
+    #[test]
+    fn an_interval_cancelling_itself() {
+        let program = body(vec![Step::Ops(vec![Op::Interval(
+            0,
+            1,
+            3,
+            vec![Op::Log(0), Op::Cancel(0)],
+        )])]);
+        check(&program, &[0]);
+    }
+
+    #[test]
     fn abort_cancels_a_sleeping_task_and_its_timer() {
         // spawn#0(sleep 5; log 0); timer(1: log 1); yield; abort#0
         // log 0 never happens.
         let victim = body(vec![Step::Sleep(5), Step::Ops(vec![Op::Log(0)])]);
         let program = body(vec![
-            Step::Ops(vec![Op::Spawn(0, victim), Op::Timer(1, vec![Op::Log(1)])]),
+            Step::Ops(vec![
+                Op::Spawn(0, victim),
+                Op::Timer(0, 1, vec![Op::Log(1)]),
+            ]),
             Step::Yield,
             Step::Ops(vec![Op::Abort(0)]),
         ]);

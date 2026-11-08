@@ -1,5 +1,6 @@
-//! Throughput benchmarks: spawning, waking, queues, and timers. They give
-//! the planned unsafe-performance phase (plan §9.6) a baseline to beat.
+//! Throughput benchmarks: spawning, waking, the microtask queue, and timers.
+//! They give the planned unsafe-performance phase (plan §9.6) a baseline to
+//! beat.
 //!
 //! Dependency-free (no criterion): each benchmark runs a batch of `n`
 //! operations several times, and reports the median and best time per
@@ -193,18 +194,6 @@ fn main() {
             for _ in 0..n {
                 let count = count.clone();
                 spool::queue_microtask(move || count.set(count.get() + 1));
-            }
-            spool::yield_now().await;
-        });
-        assert_eq!(count.get(), n);
-    });
-
-    b.run("queue/next_tick", 1_000_000, |n| {
-        let count = Rc::new(Cell::new(0));
-        spool::Runtime::new().block_on(async {
-            for _ in 0..n {
-                let count = count.clone();
-                spool::next_tick(move || count.set(count.get() + 1));
             }
             spool::yield_now().await;
         });

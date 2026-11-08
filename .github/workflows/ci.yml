@@ -11,8 +11,6 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
   RUSTDOCFLAGS: -D warnings
-  # Node parity tests must not silently skip in CI.
-  SPOOL_REQUIRE_NODE: "1"
 
 jobs:
   test:
@@ -32,9 +30,6 @@ jobs:
           # The trybuild .stderr files include std source snippets, which
           # rustc only prints when rust-src is installed.
           components: rust-src
-      - uses: actions/setup-node@v4
-        with:
-          node-version: lts/*
       - run: cargo test --all-targets
         env:
           # Beta's diagnostics differ from the stable wording the trybuild
@@ -53,9 +48,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview, rust-src
-      - uses: actions/setup-node@v4
-        with:
-          node-version: lts/*
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Line coverage (at least 90%)
         run: cargo llvm-cov --all-targets --fail-under-lines 90 --summary-only

@@ -48,15 +48,15 @@ fn waits_for_work_queued_after_main_completes() {
         spool::queue_microtask(move || {
             t1.log("microtask");
             let t2 = t1.clone();
-            spool::next_tick(move || {
-                t2.log("tick");
+            spool::set_timeout(std::time::Duration::ZERO, move || {
+                t2.log("timeout");
                 let t3 = t2.clone();
                 drop(spool::spawn(async move { t3.log("task") }));
             });
         });
         t.log("main done");
     });
-    trace.assert(&["main done", "microtask", "tick", "task"]);
+    trace.assert(&["main done", "microtask", "timeout", "task"]);
 }
 
 #[test]
@@ -156,18 +156,18 @@ fn run_flushes_work_left_by_an_earlier_block_on() {
 
 #[test]
 fn main_first_poll_runs_before_its_own_queued_work() {
-    // The first poll is the "script" (a macrotask).
+    // The first poll is a macrotask, like a program's top-level code (D4a).
     let trace = Trace::new();
     let t = trace.clone();
     spool::run(async move {
         let t1 = t.clone();
-        spool::next_tick(move || t1.log("tick"));
+        spool::queue_microtask(move || t1.log("microtask"));
         t.log("script 1");
         let t2 = t.clone();
         drop(spool::spawn(async move { t2.log("task") }));
         t.log("script 2");
     });
-    trace.assert(&["script 1", "script 2", "tick", "task"]);
+    trace.assert(&["script 1", "script 2", "microtask", "task"]);
 }
 
 #[test]

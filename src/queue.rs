@@ -1,12 +1,9 @@
-//! The tick and microtask queues, and their public APIs.
+//! The microtask queue, and its public API.
 //!
 //! In JS, the code after an `await` resumes as a promise job on the microtask
 //! queue. In Spool, the matching event is a task's `Waker` firing, so a woken
 //! task is queued on the microtask queue as a [`Microtask::Poll`], in the same
 //! FIFO order as [`queue_microtask`] callbacks (design decision D3).
-//!
-//! `next_tick` callbacks live in a separate queue that is drained before the
-//! microtask queue, following Node's `processTicksAndRejections` (§3.2).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -80,14 +77,14 @@ impl<T> Queue<T> {
 /// Microtasks run in FIFO order, interleaved with woken tasks (which are also
 /// microtasks). The microtask queue is drained completely, including
 /// microtasks queued while draining, before the runtime moves on to the next
-/// round of [`next_tick`] callbacks or to the next macrotask.
+/// macrotask (such as a timer).
 ///
 /// Microtasks can't be cancelled.
 ///
 /// # Panics
 ///
 /// If called outside a Spool runtime. A panic inside `callback` unwinds out of
-/// `run` / `block_on`, like an uncaught exception in JS.
+/// `run` / `block_on`.
 ///
 /// # Example
 ///
@@ -105,40 +102,6 @@ impl<T> Queue<T> {
 /// ```
 pub fn queue_microtask(callback: impl FnOnce() + 'static) {
     context::current("queue_microtask").queue_microtask(Box::new(callback));
-}
-
-/// Queues `callback` to run on the tick queue, like Node's `process.nextTick`.
-///
-/// The tick queue is drained completely (including ticks queued while
-/// draining) **before** the microtask queue. A tick queued from inside a
-/// microtask runs after the whole microtask queue has drained, but before the
-/// next macrotask.
-///
-/// Ticks can't be cancelled.
-///
-/// # Panics
-///
-/// If called outside a Spool runtime. A panic inside `callback` unwinds out of
-/// `run` / `block_on`.
-///
-/// # Example
-///
-/// ```
-/// use std::{cell::RefCell, rc::Rc};
-///
-/// let log = Rc::new(RefCell::new(Vec::new()));
-/// let l = log.clone();
-/// spool::run(async move {
-///     let (a, b) = (l.clone(), l.clone());
-///     spool::queue_microtask(move || a.borrow_mut().push("microtask"));
-///     spool::next_tick(move || b.borrow_mut().push("tick"));
-///     l.borrow_mut().push("sync");
-/// });
-/// // Ticks run before microtasks, even when queued after them.
-/// assert_eq!(*log.borrow(), ["sync", "tick", "microtask"]);
-/// ```
-pub fn next_tick(callback: impl FnOnce() + 'static) {
-    context::current("next_tick").next_tick(Box::new(callback));
 }
 
 #[cfg(test)]

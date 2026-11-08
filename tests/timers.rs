@@ -43,18 +43,26 @@ fn sleep_advances_the_mock_clock_exactly() {
 }
 
 #[test]
-fn sleep_zero_yields_past_ticks_and_microtasks() {
+fn sleep_zero_yields_past_queued_microtasks() {
     let (rt, clock) = mock();
     let trace = Trace::new();
     let t = trace.clone();
     rt.run(async move {
         let (t1, t2) = (t.clone(), t.clone());
-        spool::queue_microtask(move || t1.log("microtask"));
-        spool::next_tick(move || t2.log("tick"));
+        spool::queue_microtask(move || {
+            t1.log("microtask");
+            spool::queue_microtask(move || t1.log("microtask from microtask"));
+        });
+        spool::queue_microtask(move || t2.log("microtask 2"));
         spool::sleep(Duration::ZERO).await;
         t.log("after sleep(0)");
     });
-    trace.assert(&["tick", "microtask", "after sleep(0)"]);
+    trace.assert(&[
+        "microtask",
+        "microtask 2",
+        "microtask from microtask",
+        "after sleep(0)",
+    ]);
     assert_eq!(clock.elapsed(), Duration::ZERO, "no time passed");
 }
 
@@ -177,8 +185,8 @@ fn many_equal_deadline_timers_are_fifo() {
 }
 
 #[test]
-fn queues_drain_between_timer_callbacks() {
-    // Plan §8.2 scenario 3.
+fn microtasks_drain_between_timer_callbacks() {
+    // Plan §8.2 scenario 2.
     let (rt, _clock) = mock();
     let trace = Trace::new();
     let t = trace.clone();
@@ -187,24 +195,25 @@ fn queues_drain_between_timer_callbacks() {
         spool::set_timeout(Duration::ZERO, move || {
             t1.log("timer 1");
             let t2 = t1.clone();
-            spool::queue_microtask(move || t2.log("microtask from timer 1"));
-            let t3 = t1.clone();
-            spool::next_tick(move || t3.log("tick from timer 1"));
+            spool::queue_microtask(move || {
+                t2.log("microtask from timer 1");
+                spool::queue_microtask(move || t2.log("nested microtask"));
+            });
         });
         let t4 = t.clone();
         spool::set_timeout(Duration::ZERO, move || t4.log("timer 2"));
     });
     trace.assert(&[
         "timer 1",
-        "tick from timer 1",
         "microtask from timer 1",
+        "nested microtask",
         "timer 2",
     ]);
 }
 
 #[test]
 fn a_self_rearming_zero_delay_timer_does_not_starve_others() {
-    // Plan §8.2 scenario 4.
+    // Plan §8.2 scenario 3.
     fn rearm(t: Trace, n: u32) {
         spool::set_timeout(Duration::ZERO, move || {
             t.log(format!("a{n}"));
@@ -251,8 +260,8 @@ fn a_timer_armed_mid_phase_with_an_earlier_deadline_does_not_block_due_timers() 
 }
 
 #[test]
-fn nested_timeout_microtask_tick_timeout() {
-    // Plan §8.2 scenario 8.
+fn nested_timeout_microtask_timeout() {
+    // Plan §8.2 scenario 7.
     let (rt, _clock) = mock();
     let trace = Trace::new();
     let t = trace.clone();
@@ -263,23 +272,19 @@ fn nested_timeout_microtask_tick_timeout() {
             let tm = ta.clone();
             spool::queue_microtask(move || {
                 tm.log("M");
-                let tt = tm.clone();
-                spool::next_tick(move || {
-                    tt.log("T");
-                    let tb = tt.clone();
-                    spool::set_timeout(Duration::ZERO, move || tb.log("B"));
-                });
+                let tb = tm.clone();
+                spool::set_timeout(Duration::ZERO, move || tb.log("B"));
             });
         });
         let tc = t.clone();
         spool::set_timeout(Duration::ZERO, move || tc.log("C"));
     });
-    trace.assert(&["A", "M", "T", "C", "B"]);
+    trace.assert(&["A", "M", "C", "B"]);
 }
 
 #[test]
 fn spawn_from_a_timer_callback() {
-    // Plan §8.2 scenario 9 (timer part).
+    // Plan §8.2 scenario 8 (timer part).
     let (rt, _clock) = mock();
     let trace = Trace::new();
     let t = trace.clone();
@@ -401,7 +406,7 @@ fn set_interval_ticks_on_schedule_and_cancels_itself() {
 
 #[test]
 fn set_interval_interleaves_with_timeouts() {
-    // Plan §8.2 scenario 7.
+    // Plan §8.2 scenario 6.
     let (rt, _clock) = mock();
     let trace = Trace::new();
     let t = trace.clone();
@@ -424,10 +429,9 @@ fn set_interval_interleaves_with_timeouts() {
 }
 
 #[test]
-fn set_interval_drifts_instead_of_bursting() {
-    // A slow timer callback delays the interval's phase. The interval then
-    // re-arms from that late phase (Node's behavior): no burst of missed
-    // ticks.
+fn a_late_set_interval_run_does_not_shift_the_schedule() {
+    // A slow timer callback delays the interval's first run to 17ms. The
+    // schedule stays on multiples of 10ms (D7).
     let (rt, clock) = mock();
     let trace = Trace::new();
     let t = trace.clone();
@@ -443,13 +447,56 @@ fn set_interval_drifts_instead_of_bursting() {
             }
         });
     });
-    trace.assert(&["i1@17", "i2@27", "i3@37"]);
-    assert_eq!(clock.elapsed(), 37 * MS);
+    trace.assert(&["i1@17", "i2@20", "i3@30"]);
+    assert_eq!(clock.elapsed(), 30 * MS);
+}
+
+#[test]
+fn set_interval_skips_missed_runs_instead_of_bursting() {
+    // A slow timer callback holds the loop until 32ms, past the interval's
+    // 10, 20, and 30ms runs. It runs once, late, then waits for 40ms.
+    let (rt, clock) = mock();
+    let trace = Trace::new();
+    let t = trace.clone();
+    let c = clock.clone();
+    rt.run(async move {
+        spool::set_timeout(5 * MS, move || c.advance(27 * MS)); // Until 32ms.
+        let mut n = 0;
+        spool::set_interval(10 * MS, move |h| {
+            n += 1;
+            log_at(&t, &format!("i{n}"));
+            if n == 3 {
+                h.cancel();
+            }
+        });
+    });
+    trace.assert(&["i1@32", "i2@40", "i3@50"]);
+}
+
+#[test]
+fn a_set_interval_callback_slower_than_its_period_skips_runs() {
+    let (rt, clock) = mock();
+    let trace = Trace::new();
+    let t = trace.clone();
+    let c = clock.clone();
+    rt.run(async move {
+        let mut n = 0;
+        spool::set_interval(10 * MS, move |h| {
+            n += 1;
+            log_at(&t, &format!("i{n}"));
+            c.advance(15 * MS); // Each run takes 15ms.
+            if n == 3 {
+                h.cancel();
+            }
+        });
+    });
+    // 10 (busy until 25, so 20 is skipped), 30 (until 45), 50.
+    trace.assert(&["i1@10", "i2@30", "i3@50"]);
 }
 
 #[test]
 fn set_interval_callback_duration_does_not_shift_the_schedule() {
-    // Node re-arms from the phase's loop time, captured before the callback.
+    // Each run is due a whole period after the previous *deadline* (D7).
     let (rt, clock) = mock();
     let trace = Trace::new();
     let t = trace.clone();
@@ -523,15 +570,33 @@ fn interval_first_tick_is_immediate() {
 }
 
 #[test]
-fn interval_drifts_after_a_late_tick() {
+fn interval_skips_missed_ticks_and_keeps_its_schedule() {
+    let (rt, clock) = mock();
+    let c = clock.clone();
+    rt.block_on(async move {
+        let mut iv = spool::interval(10 * MS);
+        assert_eq!(iv.tick().await, at(0));
+        c.advance(25 * MS); // Busy until 25ms: the 20ms tick is missed.
+        // One late tick, reporting the time it was scheduled for...
+        assert_eq!(iv.tick().await, at(10));
+        assert_eq!(spool::now(), at(25));
+        // ...then the schedule continues on multiples of 10ms, skipping 20.
+        assert_eq!(iv.tick().await, at(30));
+        assert_eq!(iv.tick().await, at(40));
+    });
+}
+
+#[test]
+fn interval_does_not_drift_when_slightly_late() {
     let (rt, clock) = mock();
     let c = clock.clone();
     rt.block_on(async move {
         let mut iv = spool::interval(10 * MS);
         iv.tick().await;
-        c.advance(25 * MS); // Busy for 25ms: two periods missed.
-        assert_eq!(iv.tick().await, at(25), "one late tick, not a burst");
-        assert_eq!(iv.tick().await, at(35));
+        assert_eq!(iv.tick().await, at(10));
+        c.advance(4 * MS); // Work between ticks.
+        assert_eq!(iv.tick().await, at(20));
+        assert_eq!(spool::now(), at(20), "not 24");
     });
 }
 

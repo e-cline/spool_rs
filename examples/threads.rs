@@ -66,7 +66,7 @@ fn main() {
         println!("3² + 4² = {}", a.await + b.await);
 
         // Detached tasks waiting on threads don't keep `run` alive by
-        // themselves (as in Node). A `KeepAlive` per task does.
+        // themselves. A `KeepAlive` per task does.
         for n in 5..8 {
             let keep = spool::keep_alive();
             let r = r.clone();
