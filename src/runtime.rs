@@ -1,8 +1,9 @@
 //! The runtime and its event loop.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use crate::context;
 use crate::park;
 use crate::queue::{Callback, Microtask, Queue};
 use crate::slab::Slab;
-use crate::task::{self, JoinHandle, MAIN_TASK, TaskId, TaskSlot};
+use crate::task::{self, BoxFuture, JoinDyn, JoinHandle, MAIN_TASK, Payload, TaskId, TaskSlot};
 use crate::timer::{FireAction, TimerHandle, TimerQueue};
 use crate::waker::{Shared, TaskHeader};
 
@@ -22,6 +23,9 @@ static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 const STALL_MESSAGE: &str = "spool: main future stalled: it is pending but nothing can wake it \
      (no queued work, no timers, and no outstanding wakers)";
+
+const POISONED_MESSAGE: &str = "spool: this runtime is poisoned: a panic unwound out of an \
+     earlier `run` / `block_on` call on it (create a new `Runtime` instead)";
 
 /// The runtime's thread-local state. Never shared across threads.
 pub(crate) struct Inner {
@@ -33,6 +37,12 @@ pub(crate) struct Inner {
     timers: RefCell<TimerQueue>,
     clock: Rc<dyn Clock>,
     shared: Arc<Shared>,
+    /// A panic that nobody can observe (§6): re-raised out of `run` /
+    /// `block_on` at the next safe point. Only the first one is kept.
+    unobserved: Cell<Option<Payload>>,
+    /// A panic unwound out of `run` / `block_on`; the runtime can't be
+    /// driven again.
+    poisoned: Cell<bool>,
 }
 
 impl Inner {
@@ -46,6 +56,8 @@ impl Inner {
             timers: RefCell::new(TimerQueue::default()),
             clock,
             shared: Arc::new(Shared::new(id)),
+            unobserved: Cell::new(None),
+            poisoned: Cell::new(false),
         })
     }
 
@@ -79,20 +91,71 @@ impl Inner {
         F: Future + 'static,
         F::Output: 'static,
     {
-        let (wrapped, handle) = task::wrap(future);
+        task::spawn_on(self, self.this.clone(), future)
+    }
+
+    /// Inserts a task and queues its first poll.
+    pub(crate) fn insert_task(&self, future: BoxFuture, join: Rc<dyn JoinDyn>) -> TaskId {
         let id = {
             let mut tasks = self.tasks.borrow_mut();
             let id = tasks.next_key();
             let header = Arc::new(TaskHeader::new_scheduled(id, Arc::clone(&self.shared)));
             let inserted = tasks.insert(TaskSlot {
-                future: Some(wrapped),
+                future: Some(future),
                 header,
+                join,
+                aborted: false,
             });
             debug_assert_eq!(id, inserted);
             id
         };
         self.schedule_local(id);
-        handle
+        id
+    }
+
+    /// Returns `true` if task `id` hasn't finished (it may be running).
+    pub(crate) fn has_task(&self, id: TaskId) -> bool {
+        self.tasks.borrow().contains(id)
+    }
+
+    /// Aborts task `id` (§5). An idle task's future is dropped now, outside
+    /// any borrow; a running task's future is dropped when its poll returns.
+    pub(crate) fn abort_task(&self, id: TaskId) {
+        let removed = {
+            let mut tasks = self.tasks.borrow_mut();
+            let Some(slot) = tasks.get_mut(id) else {
+                return; // Already finished.
+            };
+            if slot.future.is_none() {
+                slot.aborted = true; // Running: see `poll_task`.
+                return;
+            }
+            tasks.remove(id)
+        };
+        // Dropping the future runs its abort guard (resolving the
+        // `JoinHandle`) and any user `Drop` impls.
+        drop(removed);
+    }
+
+    /// Records a panic that nobody can observe. It is re-raised by
+    /// [`raise_unobserved`](Self::raise_unobserved).
+    pub(crate) fn report_unobserved(&self, payload: Payload) {
+        match self.unobserved.take() {
+            None => self.unobserved.set(Some(payload)),
+            Some(first) => {
+                // Keep the first; drop the later one outside the cell.
+                self.unobserved.set(Some(first));
+                drop(payload);
+            }
+        }
+    }
+
+    /// Re-raises an unobserved panic, if there is one. Only called at safe
+    /// points, with no borrows held.
+    fn raise_unobserved(&self) {
+        if let Some(payload) = self.unobserved.take() {
+            resume_unwind(payload);
+        }
     }
 
     /// Polls one spawned task. Holds no `RefCell` borrow while user code runs.
@@ -105,7 +168,7 @@ impl Inner {
                     .map(|future| (future, Arc::clone(&slot.header)))
             })
         };
-        // A stale id (the task already finished) is a no-op.
+        // A stale id (the task finished or was aborted) is a no-op.
         let Some((mut future, header)) = taken else {
             return;
         };
@@ -113,24 +176,44 @@ impl Inner {
         // Clear before polling, so that a wake during the poll re-queues it.
         header.clear_scheduled();
         let waker = Waker::from(header);
-        let poll = future.as_mut().poll(&mut Context::from_waker(&waker));
+        // A panic is caught, like an exception rejecting a promise (§6).
+        let poll = catch_unwind(AssertUnwindSafe(|| {
+            future.as_mut().poll(&mut Context::from_waker(&waker))
+        }));
         drop(waker);
 
         match poll {
-            Poll::Ready(()) => {
+            Ok(Poll::Ready(())) => {
                 drop(future);
                 let slot = self.tasks.borrow_mut().remove(id);
                 drop(slot);
             }
-            Poll::Pending => {
-                let leftover = match self.tasks.borrow_mut().get_mut(id) {
-                    Some(slot) => {
-                        slot.future = Some(future);
-                        None
+            Ok(Poll::Pending) => {
+                let leftover = {
+                    let mut tasks = self.tasks.borrow_mut();
+                    match tasks.get_mut(id) {
+                        Some(slot) if !slot.aborted => {
+                            slot.future = Some(future);
+                            None
+                        }
+                        // Aborted during its own poll.
+                        Some(_) => Some((future, tasks.remove(id))),
+                        None => unreachable!("spool: a running task left the slab"),
                     }
-                    None => Some(future),
                 };
                 drop(leftover);
+            }
+            Err(payload) => {
+                let slot = self.tasks.borrow_mut().remove(id);
+                let slot = slot.expect("spool: a running task left the slab");
+                // Resolve the handle before dropping the future, so its abort
+                // guard sees the task as finished.
+                let unobserved = slot.join.reject(payload);
+                drop(slot);
+                drop(future);
+                if let Some(payload) = unobserved {
+                    self.report_unobserved(payload);
+                }
             }
         }
     }
@@ -147,21 +230,28 @@ impl Inner {
     ///
     /// `poll_main` is called for each `Poll(MAIN_TASK)` entry. If it returns
     /// `true`, draining stops immediately and this returns `true`.
+    ///
+    /// An unobserved panic is re-raised before the next item runs.
     fn drain(&self, poll_main: &mut dyn FnMut() -> bool) -> bool {
+        self.raise_unobserved();
         loop {
             while let Some(tick) = self.ticks.pop() {
                 tick();
+                self.raise_unobserved();
             }
             while let Some(microtask) = self.microtasks.pop() {
                 match microtask {
                     Microtask::Poll(id) if id == MAIN_TASK => {
-                        if poll_main() {
+                        let done = poll_main();
+                        self.raise_unobserved();
+                        if done {
                             return true;
                         }
                     }
                     Microtask::Poll(id) => self.poll_task(id),
                     Microtask::Callback(callback) => callback(),
                 }
+                self.raise_unobserved();
             }
             if self.ticks.is_empty() {
                 return false;
@@ -257,14 +347,31 @@ impl Inner {
             drop(slots);
             drop(timers);
         }
+        // A panic nobody observed before the runtime went away is dropped
+        // silently: panicking inside `Drop` is not an option (§6).
+        drop(self.unobserved.take());
     }
 
     /// The shared driver behind `block_on` and `run`.
     fn drive<F: Future>(&self, future: F, mode: Mode) -> F::Output {
+        /// Poisons the runtime if a panic unwinds out of `drive`.
+        struct PoisonOnUnwind<'a>(&'a Cell<bool>);
+        impl Drop for PoisonOnUnwind<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    self.0.set(true);
+                }
+            }
+        }
+
+        assert!(!self.poisoned.get(), "{POISONED_MESSAGE}");
+        let _poison = PoisonOnUnwind(&self.poisoned);
+
         // Uphold Node's invariant that the queues are empty before a
         // macrotask starts: flush work left over from an earlier `block_on`
         // or spawned before this call. (A leftover `Poll(MAIN_TASK)` is a
-        // stale wake from an earlier main future; it is ignored.)
+        // stale wake from an earlier main future; it is ignored.) This also
+        // re-raises a panic that went unobserved between calls.
         self.drain(&mut || false);
 
         let mut main = MainTask {
@@ -279,7 +386,9 @@ impl Inner {
 
         // Main's first poll is the "script": a macrotask, like a JS program's
         // top-level code. Ticks and microtasks it queues run after it.
-        if main.poll_if_pending() && stop_when_main_done {
+        let done = main.poll_if_pending();
+        self.raise_unobserved();
+        if done && stop_when_main_done {
             return main.take_output();
         }
 
@@ -430,7 +539,20 @@ impl Runtime {
     ///   `block_on`).
     /// - If `future` stalls: it is pending, no work is queued, and no `Waker`
     ///   for it exists anywhere, so nothing can ever wake it.
-    /// - If any task or callback panics (the panic unwinds out of `run`).
+    /// - If the runtime is poisoned (see below).
+    ///
+    /// Panics follow the JS-exception model. A panic unwinds out of `run`
+    /// (the runtime then stays **poisoned**: later `run` / `block_on` calls on
+    /// it panic, but a new `Runtime` works normally) when:
+    ///
+    /// - `future` itself, or a tick, microtask, or timer callback, panics;
+    /// - a task panics and nobody can observe it: its [`JoinHandle`] was
+    ///   dropped, or is dropped later without being awaited (like an
+    ///   unhandled promise rejection);
+    /// - a task re-throws the panic of a task it awaited, and so on up.
+    ///
+    /// A task's panic that *is* observed (by awaiting its `JoinHandle`, or
+    /// with [`try_join`](JoinHandle::try_join)) does not reach `run`.
     ///
     /// ```
     /// use std::{cell::Cell, rc::Rc};

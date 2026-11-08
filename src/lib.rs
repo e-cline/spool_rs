@@ -23,6 +23,15 @@
 //! | [`set_timeout`] / [`TimerHandle::cancel`] | `setTimeout` / `clearTimeout` |
 //! | [`set_interval`] / [`TimerHandle::cancel`] | `setInterval` / `clearInterval` |
 //! | [`sleep`]`(d).await` | `await new Promise(r => setTimeout(r, ms))` |
+//! | `handle.await` on a task that panicked | `await` on a rejected promise: re-throws |
+//! | [`JoinHandle::try_join`] | `try { await p } catch (e) { .. }` |
+//! | a panic in a detached task | an unhandled rejection: crashes the process |
+//!
+//! Panics behave like JS exceptions in async code. A task's panic is caught
+//! and re-thrown in whoever awaits its [`JoinHandle`]; a panic that nobody
+//! can observe, or one in a callback or `main`, unwinds out of [`run`] /
+//! [`block_on`]. After that, the runtime is poisoned and can't be driven
+//! again.
 //!
 //! Two differences from JS:
 //! - In JS, `await` always takes a microtask hop. In Rust, `.await` on a
@@ -73,7 +82,7 @@ mod yield_now;
 pub use clock::{Clock, Instant, MockClock, SystemClock, now};
 pub use queue::{next_tick, queue_microtask};
 pub use runtime::{Builder, Runtime, block_on, run};
-pub use task::{JoinHandle, spawn};
+pub use task::{AbortHandle, AbortOnDrop, JoinError, JoinHandle, TryJoin, spawn};
 pub use timer::{
     Elapsed, Interval, Sleep, Timeout, TimerHandle, interval, set_interval, set_timeout, sleep,
     sleep_until, timeout, timeout_at,

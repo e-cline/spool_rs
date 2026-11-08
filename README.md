@@ -29,10 +29,11 @@ spool::run(async {
 
 > **Status:** early development. Implemented so far: M0 (scaffold), M1 (core
 > loop: `block_on`, `spawn`, `JoinHandle`, `yield_now`), M2 (`queue_microtask`,
-> `next_tick`, Node's drain order, `run`), and M3 (timers: `sleep`,
-> `timeout`, `interval`, `set_timeout`, `set_interval`, `MockClock`). Next up
-> are task cancellation and the panic model. See
-> [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md).
+> `next_tick`, Node's drain order, `run`), M3 (timers: `sleep`,
+> `timeout`, `interval`, `set_timeout`, `set_interval`, `MockClock`), and M4
+> (cancellation and panics: `abort`, `AbortHandle`, `abort_on_drop`,
+> `try_join`, the JS-exception panic model, poisoning). Next up are liveness
+> and threads (M5). See [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md).
 
 ## Development
 

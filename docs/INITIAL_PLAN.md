@@ -485,6 +485,22 @@ Caveats (documented):
 - After a panic unwinds out of `run` or `block_on`, that runtime is
   **poisoned** and can't be reused. A fresh `Runtime` works normally.
 
+As built (M4):
+- **Safe points.** An unobserved panic is re-raised right after the tick,
+  microtask, task poll, or main poll that produced it, and at the start of
+  each `run` / `block_on` call (which covers a handle dropped between calls).
+  Nothing else runs first, so the loop stops at once, as Node does on an
+  unhandled rejection. Only the first unobserved panic is kept.
+- **Resolving the handle.** The wrapped task future owns a guard. If the
+  future is dropped before it finishes (on abort or at teardown), the guard
+  marks the task `Aborted` and wakes the joiner. A panic overrides that
+  state, since unwinding out of the `async` block already ran the guard.
+  So abort needs no type-erased access to the join state; only panics use
+  `JoinDyn`.
+- **Self-abort.** A task that aborts itself and then completes in the same
+  poll keeps its output: it finished before its future could be dropped.
+- A **detached task's output** is dropped as soon as the task finishes.
+
 ---
 
 ## 7. Clock and park
