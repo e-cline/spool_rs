@@ -52,8 +52,6 @@
 //! | [`set_interval`] / [`TimerHandle::cancel`] | `setInterval` / `clearInterval` |
 //! | [`sleep`]`(d).await` | `await new Promise(r => setTimeout(r, ms))` |
 //! | [`timeout`]`(d, fut)` | `Promise.race([p, rejectAfter(ms)])` (but `fut` is dropped) |
-//! | `handle.await` on a task that panicked | `await` on a rejected promise: re-throws |
-//! | [`JoinHandle::try_join`] | `try { await p } catch (e) { .. }` |
 //!
 //! Some deliberate differences:
 //! - In JS, `await` always takes a microtask hop. In Rust, `.await` on a
@@ -65,6 +63,8 @@
 //!   `process.nextTick`.
 //! - Delays aren't clamped to 1ms, but a zero delay still waits for the next
 //!   timers phase.
+//! - A panic is not a rejected promise: Spool never catches it (see
+//!   [Panics](#panics)). Errors a caller should handle are `Result` values.
 //!
 //! ## The event loop
 //!
@@ -123,17 +123,30 @@
 //!
 //! ## Panics
 //!
-//! Panics propagate like exceptions in async code.
+//! Spool doesn't catch panics, so they behave the same on every target. A
+//! panic in `main`, in any task (awaited or not), or in a microtask or timer
+//! callback stops the loop at once:
 //!
-//! - A task's panic is caught, and re-thrown in whoever awaits its
-//!   [`JoinHandle`] (or returned as an `Err` by [`JoinHandle::try_join`]).
-//! - A panic that nobody can observe (in a detached task, or held by a
-//!   handle that is dropped without being awaited), and any panic in `main`
-//!   or a callback, unwinds out of [`run`] / [`block_on`]. The runtime is then
-//!   **poisoned**: it can't be driven again, but a new one works normally.
+//! - with `panic = "unwind"` (the default on native targets), it unwinds out
+//!   of [`run`] / [`block_on`];
+//! - with `panic = "abort"` (the default on WASM), it ends the program.
 //!
-//! This needs `panic = "unwind"`, the default on native targets. With
-//! `panic = "abort"` (the default on WASM), every panic ends the program.
+//! Which of the two happens is your application's choice: Spool doesn't
+//! override it. To make native behave exactly like WASM, set this in your
+//! application's `Cargo.toml` (tests always unwind, whatever it says):
+//!
+//! ```toml
+//! [profile.release]
+//! panic = "abort"
+//! ```
+//!
+//! After a panic unwinds out, drop the runtime (which drops its remaining
+//! tasks and timers as usual) rather than driving it again: the interrupted
+//! turn may have lost work, so what it would do is unspecified (though never
+//! unsound). A new [`Runtime`] works normally.
+//!
+//! A task that can fail should return a `Result`. [`JoinHandle::try_join`]
+//! only reports an abort.
 //!
 //! ## Threads
 //!

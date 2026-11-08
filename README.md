@@ -8,6 +8,8 @@ platforms and WASM (browser and WASI support are in progress).
 - Simple, predictable ordering: a woken task is queued as a microtask, in
   FIFO order, like the code after an `await` in JS. Timers run one at a
   time, and the microtask queue drains after each.
+- Panics behave the same everywhere: Spool never catches them, so a panic
+  stops the loop. Errors a caller should handle are `Result` values.
 - Zero runtime dependencies, no `unsafe`.
 
 ```rust
@@ -33,9 +35,10 @@ the design ([`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md)) defines its
 semantics.
 
 > **Status:** early development. Done: M0–M6 (the core loop, microtasks,
-> timers, cancellation, the panic model, liveness and threads, and polish)
-> and M7 (realigning with design v4: no `next_tick`, intervals that don't
-> drift, and a reference model as the test oracle). Next: M8, a
+> timers, cancellation, liveness and threads, and polish), M7 (realigning
+> with design v4: no `next_tick`, intervals that don't drift, and a
+> reference model as the test oracle), and M7.5 (design v5: Spool no longer
+> catches panics, so they behave the same natively and on WASM). Next: M8, a
 > non-blocking core so the loop can run in the browser. See
 > [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md) §12.
 
@@ -49,7 +52,7 @@ with `MockClock`.
 cargo run --example hello          # tasks interleaving at each `.await`
 cargo run --example timers         # the program above, plus an interval
 cargo run --example cancellation   # timeouts, abort, abort_on_drop, cancelling timers
-cargo run --example panics         # try_join, re-throwing, unobserved panics, poisoning
+cargo run --example panics         # errors as `Result`s, try_join on abort, a panic stopping the loop
 cargo run --example threads        # waking `!Send` tasks from worker threads, KeepAlive
 ```
 

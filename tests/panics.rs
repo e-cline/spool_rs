@@ -1,22 +1,17 @@
-//! The JS-exception panic model (§6 of the plan): every row of the table,
-//! plus poisoning.
-
-// `spawn(async move { h.await })` deliberately makes a separate awaiting
-// task, and some tests return a `JoinHandle` out of `block_on`.
-#![allow(clippy::redundant_async_block, clippy::async_yields_async)]
+//! The panic model (§6 of the plan): Spool doesn't catch panics. Every kind
+//! of panic unwinds straight out of `run` / `block_on` and stops the loop at
+//! once, and the runtime can still be dropped cleanly afterwards.
+//!
+//! These tests need `panic = "unwind"`, so they are native-only.
 
 mod common;
 
-use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
 use std::time::Duration;
 
-use common::{DropCounter, Gate, Trace, expect_panic, never, panic_message};
-use spool::JoinError;
+use common::{DropCounter, Trace, expect_panic, never};
 
-const POISONED: &str = "runtime is poisoned";
-
-// ── Row: main panics → unwinds out at once ──────────────────────────────────
+// ── Main and callbacks ──────────────────────────────────────────────────────
 
 #[test]
 fn panic_in_main_unwinds_out_of_block_on() {
@@ -34,8 +29,6 @@ fn panic_in_main_unwinds_out_of_run() {
     });
     assert_eq!(msg, "main boom");
 }
-
-// ── Row: callbacks panic → unwind out at once ───────────────────────────────
 
 #[test]
 fn panics_in_callbacks_unwind_out_at_once() {
@@ -55,152 +48,10 @@ fn panics_in_callbacks_unwind_out_at_once() {
     assert_eq!(msg, "interval");
 }
 
-#[test]
-fn a_callback_panic_inside_a_task_is_not_caught_by_the_task() {
-    // The callback runs on the event loop, not inside the task's poll, so
-    // awaiting the task can't observe it.
-    let msg = expect_panic(|| {
-        spool::block_on(async {
-            let h = spool::spawn(async {
-                spool::queue_microtask(|| panic!("cb"));
-                spool::yield_now().await;
-            });
-            h.try_join().await
-        })
-    });
-    assert_eq!(msg, "cb");
-}
-
-// ── Row: awaited task panics → re-thrown in the awaiter ─────────────────────
+// ── Tasks ───────────────────────────────────────────────────────────────────
 
 #[test]
-fn awaiting_a_panicked_task_rethrows_in_main() {
-    let msg = expect_panic(|| {
-        spool::block_on(async {
-            spool::spawn(async {
-                spool::yield_now().await;
-                panic!("later boom");
-            })
-            .await
-        })
-    });
-    assert_eq!(msg, "later boom");
-}
-
-#[test]
-fn rethrow_preserves_the_payload() {
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        spool::block_on(async { spool::spawn(async { panic_any(42_i32) }).await })
-    }));
-    assert_eq!(*result.unwrap_err().downcast::<i32>().unwrap(), 42);
-}
-
-#[test]
-fn panics_propagate_up_a_chain_of_awaits() {
-    let err = spool::block_on(async {
-        let c = spool::spawn(async {
-            spool::yield_now().await;
-            panic!("deep");
-        });
-        let b = spool::spawn(async move { c.await });
-        let a = spool::spawn(async move { b.await });
-        a.try_join().await.unwrap_err()
-    });
-    assert_eq!(err.to_string(), "task panicked: deep");
-}
-
-#[test]
-fn a_rethrown_panic_in_a_detached_awaiter_unwinds_out() {
-    let msg = expect_panic(|| {
-        spool::run(async {
-            let inner = spool::spawn(async { panic!("inner") });
-            drop(spool::spawn(async move { inner.await }));
-        })
-    });
-    assert_eq!(msg, "inner");
-}
-
-#[test]
-fn the_rethrow_can_be_caught_like_any_panic() {
-    // The re-throw is an ordinary unwind inside the awaiter's poll.
-    let out = spool::block_on(async {
-        let mut h = spool::spawn(async { panic!("boom") });
-        spool::yield_now().await;
-        let caught = catch_unwind(AssertUnwindSafe(|| {
-            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-            std::pin::Pin::new(&mut h).poll(&mut cx)
-        }));
-        panic_message(&*caught.unwrap_err())
-    });
-    assert_eq!(out, "boom");
-}
-
-// ── Row: try_join → Err(Panicked) ───────────────────────────────────────────
-
-#[test]
-fn try_join_returns_the_panic() {
-    let err = spool::block_on(async { spool::spawn(async { panic!("caught") }).try_join().await });
-    let err = err.unwrap_err();
-    assert!(err.is_panic());
-    assert_eq!(err.to_string(), "task panicked: caught");
-    let payload = err.try_into_panic().unwrap();
-    assert_eq!(panic_message(&*payload), "caught");
-}
-
-#[test]
-fn try_join_after_the_task_already_panicked() {
-    spool::block_on(async {
-        let h = spool::spawn(async { panic!("early") });
-        for _ in 0..3 {
-            spool::yield_now().await;
-        }
-        assert!(h.is_finished());
-        assert!(matches!(h.try_join().await, Err(JoinError::Panicked(_))));
-    });
-}
-
-#[test]
-fn an_observed_panic_does_not_disturb_other_tasks() {
-    let trace = Trace::new();
-    let t = trace.clone();
-    spool::run(async move {
-        let t2 = t.clone();
-        let bystander = spool::spawn(async move {
-            for i in 0..3 {
-                t2.log(format!("bystander {i}"));
-                spool::yield_now().await;
-            }
-        });
-        let bad = spool::spawn(async {
-            spool::yield_now().await;
-            panic!("bad");
-        });
-        let r = bad.try_join().await;
-        t.log(format!("main saw {r:?}"));
-        bystander.await;
-    });
-    // The panic wakes main like a rejection resolving: main is queued behind
-    // the bystander's already-queued poll.
-    trace.assert(&[
-        "bystander 0",
-        "bystander 1",
-        "bystander 2",
-        "main saw Err(Panicked(\"bad\"))",
-    ]);
-}
-
-#[test]
-fn an_observed_panic_does_not_poison() {
-    let rt = spool::Runtime::new();
-    let r = rt.block_on(async { spool::spawn(async { panic!("x") }).try_join().await });
-    assert!(r.is_err());
-    assert_eq!(rt.block_on(async { 1 }), 1);
-}
-
-// ── Row: detached task panics → unwinds out ─────────────────────────────────
-
-#[test]
-fn panic_in_a_detached_task_unwinds_out_of_block_on() {
+fn panic_in_a_detached_task_unwinds_out() {
     let msg = expect_panic(|| {
         spool::block_on(async {
             drop(spool::spawn(async { panic!("task boom") }));
@@ -212,28 +63,67 @@ fn panic_in_a_detached_task_unwinds_out_of_block_on() {
 }
 
 #[test]
-fn panic_in_a_detached_task_stops_the_loop_at_once() {
+fn panic_in_an_awaited_task_unwinds_out_not_into_the_awaiter() {
+    let trace = Trace::new();
+    let t = trace.clone();
+    let msg = expect_panic(move || {
+        spool::block_on(async move {
+            let h = spool::spawn(async {
+                spool::yield_now().await;
+                panic!("later boom");
+            });
+            h.await;
+            t.log("main resumed (must not happen)");
+        })
+    });
+    assert_eq!(msg, "later boom");
+    trace.assert(&[]);
+}
+
+#[test]
+fn try_join_does_not_catch_a_panic() {
+    let msg = expect_panic(|| {
+        spool::block_on(async {
+            spool::spawn(async { panic!("not caught") })
+                .try_join()
+                .await
+        })
+    });
+    assert_eq!(msg, "not caught");
+}
+
+#[test]
+fn the_payload_is_preserved() {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        spool::block_on(async { spool::spawn(async { panic_any(42_i32) }).await })
+    }));
+    assert_eq!(*result.unwrap_err().downcast::<i32>().unwrap(), 42);
+}
+
+#[test]
+fn a_panic_stops_the_loop_at_once() {
     let trace = Trace::new();
     let t = trace.clone();
     let msg = expect_panic(move || {
         spool::run(async move {
-            let (t1, t2) = (t.clone(), t.clone());
+            let (t1, t2, t3) = (t.clone(), t.clone(), t.clone());
             drop(spool::spawn(async move {
                 t1.log("bad runs");
-                panic!("detached");
+                panic!("stop");
             }));
             drop(spool::spawn(async move {
                 t2.log("queued after (must not run)")
             }));
+            spool::set_timeout(Duration::ZERO, move || t3.log("timer (must not run)"));
             t.log("main");
         })
     });
-    assert_eq!(msg, "detached");
+    assert_eq!(msg, "stop");
     trace.assert(&["main", "bad runs"]);
 }
 
 #[test]
-fn panic_in_a_detached_task_inside_a_timer() {
+fn panic_in_a_task_after_a_sleep() {
     let clock = spool::MockClock::new();
     let rt = spool::Runtime::builder().clock(clock.clone()).build();
     let msg = expect_panic(|| {
@@ -249,241 +139,49 @@ fn panic_in_a_detached_task_inside_a_timer() {
 }
 
 #[test]
-fn only_the_first_unobserved_panic_is_raised() {
+fn the_aborted_panic_unwinds_out_like_any_other() {
     let msg = expect_panic(|| {
         spool::block_on(async {
-            let a = spool::spawn(async { panic!("first") });
-            let b = spool::spawn(async { panic!("second") });
-            spool::yield_now().await;
-            spool::yield_now().await;
-            // Both are held in live handles; dropping both in one turn makes
-            // two unobserved panics.
-            drop(a);
-            drop(b);
-            spool::yield_now().await;
+            let h = spool::spawn(never());
+            h.abort();
+            h.await
         })
     });
-    assert_eq!(msg, "first");
+    assert!(msg.contains("task was aborted"), "{msg}");
 }
 
-// ── Row: held in a live handle, then dropped unobserved ─────────────────────
-
-#[test]
-fn a_held_panic_waits_for_the_handle() {
-    let trace = Trace::new();
-    let t = trace.clone();
-    let msg = expect_panic(move || {
-        spool::run(async move {
-            let h = spool::spawn(async { panic!("held") });
-            for i in 0..3 {
-                spool::yield_now().await;
-                t.log(format!("turn {i}"));
-            }
-            assert!(h.is_finished());
-            drop(h); // Unobserved: re-raised at the next safe point.
-            t.log("same turn");
-            spool::yield_now().await;
-            t.log("next turn (must not run)");
-        })
-    });
-    assert_eq!(msg, "held");
-    trace.assert(&["turn 0", "turn 1", "turn 2", "same turn"]);
-}
-
-#[test]
-fn a_held_panic_dropped_as_main_completes_still_unwinds() {
-    let msg = expect_panic(|| {
-        spool::block_on(async {
-            let h = spool::spawn(async { panic!("last moment") });
-            spool::yield_now().await;
-            drop(h);
-            "main finished"
-        })
-    });
-    assert_eq!(msg, "last moment");
-}
-
-#[test]
-fn a_held_panic_dropped_during_mains_first_poll() {
-    let rt = spool::Runtime::new();
-    let h = rt.spawn(async { panic!("pre-spawned") });
-    let msg = expect_panic(|| {
-        rt.block_on(async move {
-            // The pre-drain already ran the task.
-            assert!(h.is_finished());
-            drop(h);
-        })
-    });
-    assert_eq!(msg, "pre-spawned");
-}
-
-#[test]
-fn a_held_panic_dropped_between_calls_is_raised_by_the_next_call() {
-    let rt = spool::Runtime::new();
-    let h = rt.block_on(async {
-        let h = spool::spawn(async { panic!("between") });
-        spool::yield_now().await;
-        h
-    });
-    drop(h); // Outside any `block_on`.
-    let msg = expect_panic(|| rt.block_on(async {}));
-    assert_eq!(msg, "between");
-}
-
-#[test]
-fn a_held_panic_is_dropped_silently_with_the_runtime() {
-    let rt = spool::Runtime::new();
-    let h = rt.block_on(async {
-        let h = spool::spawn(async { panic!("silenced") });
-        spool::yield_now().await;
-        h
-    });
-    drop(rt);
-    drop(h); // No runtime left to report to: no panic.
-}
-
-#[test]
-fn an_unobserved_panic_is_dropped_silently_with_the_runtime() {
-    let rt = spool::Runtime::new();
-    let h = rt.block_on(async {
-        let h = spool::spawn(async { panic!("silenced") });
-        spool::yield_now().await;
-        h
-    });
-    drop(h); // Reported, but never raised...
-    drop(rt); // ...and dropped here without panicking.
-}
-
-#[test]
-fn a_held_panic_can_still_be_awaited_later() {
-    let rt = spool::Runtime::new();
-    let h = rt.block_on(async {
-        let h = spool::spawn(async { panic!("later") });
-        spool::yield_now().await;
-        h
-    });
-    let err = rt.block_on(h.try_join()).unwrap_err();
-    assert_eq!(err.to_string(), "task panicked: later");
-}
-
-// ── What a panicking task leaves behind ─────────────────────────────────────
+// ── After a panic ───────────────────────────────────────────────────────────
 
 #[test]
 fn a_panicking_tasks_future_is_dropped_once() {
     let counter = DropCounter::new();
-    let c = counter.clone();
-    spool::block_on(async move {
-        let tok = c.token();
-        let h = spool::spawn(async move {
-            let _tok = tok;
-            spool::yield_now().await;
-            panic!("drop me");
-        });
-        assert!(h.try_join().await.is_err());
-        assert_eq!(c.count(), 1);
+    let rt = spool::Runtime::new();
+    let tok = counter.token();
+    let _ = expect_panic(|| {
+        rt.block_on(async move {
+            drop(spool::spawn(async move {
+                let _tok = tok;
+                spool::yield_now().await;
+                panic!("drop me");
+            }));
+            never().await;
+        })
     });
+    assert_eq!(counter.count(), 1, "dropped while unwinding");
+    drop(rt);
     assert_eq!(counter.count(), 1);
 }
 
 #[test]
-fn a_panicking_task_is_finished() {
-    spool::block_on(async {
-        let gate = Gate::new();
-        let g = gate.clone();
-        let h = spool::spawn(async move {
-            g.wait().await;
-            panic!("p");
-        });
-        let a = h.abort_handle();
-        spool::yield_now().await;
-        assert!(!h.is_finished() && !a.is_finished());
-        gate.open();
-        spool::yield_now().await;
-        assert!(h.is_finished() && a.is_finished());
-        a.abort(); // No-op: it already finished.
-        assert!(h.try_join().await.unwrap_err().is_panic());
-    });
-}
-
-#[test]
-fn a_panicking_tasks_wakers_go_stale() {
+fn a_panicking_tasks_handle_resolves_as_aborted() {
     let rt = spool::Runtime::new();
-    let stash: std::rc::Rc<std::cell::RefCell<Option<std::task::Waker>>> = Default::default();
-    let s = stash.clone();
-    let h = rt.spawn(std::future::poll_fn(move |cx| -> std::task::Poll<()> {
-        *s.borrow_mut() = Some(cx.waker().clone());
-        panic!("stale");
-    }));
-    let r = rt.block_on(h.try_join());
-    assert!(r.is_err());
-    stash.borrow_mut().take().unwrap().wake(); // Ignored.
-    assert_eq!(rt.block_on(async { 3 }), 3);
+    let h = rt.spawn(async { panic!("p") });
+    let _ = expect_panic(|| rt.block_on(async { spool::yield_now().await }));
+    assert!(h.is_finished());
 }
 
 #[test]
-fn the_abort_panic_when_awaiting_does_not_poison_if_caught() {
-    let rt = spool::Runtime::new();
-    let err = rt.block_on(async {
-        let target = spool::spawn(never());
-        target.abort();
-        spool::spawn(async move { target.await })
-            .try_join()
-            .await
-            .unwrap_err()
-    });
-    assert!(err.to_string().contains("task was aborted"), "{err}");
-    assert_eq!(rt.block_on(async { 2 }), 2);
-}
-
-// ── Poisoning ───────────────────────────────────────────────────────────────
-
-#[test]
-fn a_panic_out_of_block_on_poisons_the_runtime() {
-    let rt = spool::Runtime::new();
-    let _ = expect_panic(|| rt.block_on(async { panic!("first") }));
-    let msg = expect_panic(|| rt.block_on(async { 1 }));
-    assert!(msg.contains(POISONED), "{msg}");
-    let msg = expect_panic(|| rt.run(async { 1 }));
-    assert!(msg.contains(POISONED), "{msg}");
-}
-
-#[test]
-fn every_kind_of_escaping_panic_poisons() {
-    type Case = Box<dyn Fn(&spool::Runtime)>;
-    let cases: Vec<(&str, Case)> = vec![
-        ("main", Box::new(|rt| rt.block_on(async { panic!("x") }))),
-        (
-            "callback",
-            Box::new(|rt| rt.run(async { spool::queue_microtask(|| panic!("x")) })),
-        ),
-        (
-            "detached task",
-            Box::new(|rt| {
-                rt.run(async {
-                    drop(spool::spawn(async { panic!("x") }));
-                })
-            }),
-        ),
-        ("stall", Box::new(|rt| rt.block_on(never()))),
-    ];
-    for (name, case) in cases {
-        let rt = spool::Runtime::new();
-        let _ = expect_panic(|| case(&rt));
-        let msg = expect_panic(|| rt.block_on(async {}));
-        assert!(msg.contains(POISONED), "{name}: {msg}");
-    }
-}
-
-#[test]
-fn a_nested_block_on_panic_does_not_poison_the_inner_runtime() {
-    let other = spool::Runtime::new();
-    let msg = expect_panic(|| spool::block_on(async { other.block_on(async {}) }));
-    assert!(msg.contains("nested"), "{msg}");
-    assert_eq!(other.block_on(async { 5 }), 5);
-}
-
-#[test]
-fn a_poisoned_runtime_still_drops_its_tasks() {
+fn the_runtime_still_drops_its_tasks_and_timers() {
     let counter = DropCounter::new();
     let rt = spool::Runtime::new();
     for _ in 0..3 {
@@ -495,13 +193,36 @@ fn a_poisoned_runtime_still_drops_its_tasks() {
     }
     let _ = expect_panic(|| {
         rt.block_on(async {
+            let tok = counter.token();
+            spool::set_timeout(Duration::from_secs(60), move || drop(tok));
             spool::yield_now().await;
-            panic!("poison");
+            panic!("boom");
         })
     });
     assert_eq!(counter.count(), 0);
     drop(rt);
-    assert_eq!(counter.count(), 3);
+    assert_eq!(counter.count(), 4);
+}
+
+#[test]
+fn a_panic_in_a_timer_phase_still_drops_cleanly() {
+    let counter = DropCounter::new();
+    let clock = spool::MockClock::new();
+    let rt = spool::Runtime::builder().clock(clock.clone()).build();
+    let (c, clk) = (counter.clone(), clock.clone());
+    let _ = expect_panic(|| {
+        rt.run(async move {
+            spool::set_timeout(Duration::ZERO, move || {
+                // Armed in the past during the phase: set aside for the next.
+                clk.advance(Duration::from_millis(5));
+                let tok = c.token();
+                spool::set_timeout(Duration::ZERO, move || drop(tok));
+                panic!("mid-phase");
+            });
+        })
+    });
+    drop(rt);
+    assert_eq!(counter.count(), 1);
 }
 
 #[test]
@@ -519,10 +240,16 @@ fn a_fresh_runtime_works_after_a_panic() {
 }
 
 #[test]
-fn spawning_on_a_poisoned_runtime_is_allowed_but_it_cannot_run() {
-    let rt = spool::Runtime::new();
-    let _ = expect_panic(|| rt.block_on(async { panic!("x") }));
-    let h = rt.spawn(async { 1 });
-    let msg = expect_panic(|| rt.block_on(h));
-    assert!(msg.contains(POISONED), "{msg}");
+fn a_panic_leaves_no_runtime_entered() {
+    let _ = expect_panic(|| spool::block_on(async { panic!("x") }));
+    let msg = expect_panic(|| spool::spawn(async {}));
+    assert!(msg.contains("outside of a Spool runtime"), "{msg}");
+}
+
+#[test]
+fn a_nested_block_on_panic_leaves_the_inner_runtime_usable() {
+    let other = spool::Runtime::new();
+    let msg = expect_panic(|| spool::block_on(async { other.block_on(async {}) }));
+    assert!(msg.contains("nested"), "{msg}");
+    assert_eq!(other.block_on(async { 5 }), 5);
 }

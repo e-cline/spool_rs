@@ -8,9 +8,8 @@
 //! sleeps, joins, aborts, and panics. Spool runs them on a `MockClock`, and
 //! the model keeps its own virtual time, so timers are deterministic.
 //!
-//! A panic in a joined child is observed by its parent (`try_join`); any
-//! other panic crashes the run (plan §6), and the traces must match up to
-//! the crash.
+//! Spool doesn't catch panics (plan §6): any panic crashes the run at
+//! once, and the traces must match up to the crash.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -270,7 +269,7 @@ fn spool_body(body: Body, ctx: Ctx) -> Pin<Box<dyn Future<Output = ()>>> {
                 }
                 Step::Join(child) => {
                     let child = spool::spawn(spool_body(child.clone(), ctx.clone()));
-                    // A panic in the child is observed here, and ignored.
+                    // `Err` only if the child was aborted.
                     let _ = child.try_join().await;
                 }
                 Step::Panic => std::panic::panic_any(MODEL_PANIC),
@@ -311,14 +310,10 @@ struct Task {
     body: Body,
     pc: usize,
     joiner: Option<usize>,
-    /// Completed or panicked.
     finished: bool,
     /// Aborted: it never runs again, and its handle on a joined child is
     /// gone.
     aborted: bool,
-    /// A joined child panicked, and this task hasn't resumed to observe it
-    /// yet. Aborting it now leaves the panic unobserved.
-    holds_panic: bool,
 }
 
 /// A microtask.
@@ -374,7 +369,7 @@ struct Model {
     intervals: HashMap<usize, IntervalState>,
     /// The task being resumed right now.
     current: Option<usize>,
-    /// An unobserved panic: the run stops after the current job.
+    /// A panic: the run stops at once.
     crashed: bool,
     log: Vec<u32>,
 }
@@ -387,7 +382,6 @@ impl Model {
             joiner,
             finished: false,
             aborted: false,
-            holds_panic: false,
         });
         self.tasks.len() - 1
     }
@@ -468,14 +462,10 @@ impl Model {
         // Otherwise it is aborting itself: killed once it suspends.
     }
 
-    /// Drops an aborted task's future: its sleep is cancelled, and a panic
-    /// it was holding becomes unobserved.
+    /// Drops an aborted task's future: its sleep is cancelled.
     fn kill(&mut self, id: usize) {
         self.timers
             .retain(|_, job| !matches!(job, TimerJob::Wake(t) if *t == id));
-        if self.tasks[id].holds_panic {
-            self.crashed = true;
-        }
     }
 
     /// Whether `joiner` can still observe its child's result.
@@ -488,7 +478,6 @@ impl Model {
         if self.tasks[id].aborted || self.tasks[id].finished {
             return; // A stale wake.
         }
-        self.tasks[id].holds_panic = false; // Observed by `try_join`.
         self.current = Some(id);
         let suspended = self.step(id);
         self.current = None;
@@ -531,24 +520,15 @@ impl Model {
                     return true;
                 }
                 Step::Panic => {
-                    // Delivered to a live joiner (a microtask hop), or else
-                    // unobserved.
-                    self.tasks[id].finished = true;
-                    match self.live_joiner(self.tasks[id].joiner) {
-                        Some(joiner) => {
-                            self.tasks[joiner].holds_panic = true;
-                            self.microtasks.push_back(Job::Resume(joiner));
-                        }
-                        None => self.crashed = true,
-                    }
+                    self.crashed = true;
                     return false;
                 }
             }
         }
     }
 
-    /// Runs every microtask, including ones queued meanwhile. Stops after
-    /// the job that crashed.
+    /// Runs every microtask, including ones queued meanwhile. Stops at a
+    /// crash.
     fn drain(&mut self) {
         while let Some(job) = self.microtasks.pop_front() {
             match job {
@@ -617,8 +597,7 @@ impl Model {
 
     fn run(program: &Body) -> Outcome {
         let mut model = Model::default();
-        // Main's first poll runs directly, as a macrotask. Main has no
-        // joiner, so a panic in main crashes the run, as in Spool.
+        // Main's first poll runs directly, as a macrotask.
         let main = model.spawn(program.clone(), None);
         model.resume(main);
         loop {
@@ -822,14 +801,14 @@ mod model_sanity {
     }
 
     #[test]
-    fn a_joined_panic_is_observed() {
+    fn a_joined_panic_crashes() {
         let child = body(vec![Step::Ops(vec![Op::Log(0)]), Step::Panic]);
         let program = body(vec![Step::Join(child), Step::Ops(vec![Op::Log(1)])]);
-        check(&program, &[0, 1]);
+        check_outcome(&program, &[0], true);
     }
 
     #[test]
-    fn a_detached_panic_crashes_after_its_job() {
+    fn a_detached_panic_crashes_at_once() {
         let bad = body(vec![Step::Ops(vec![Op::Log(1)]), Step::Panic]);
         let after = body(vec![Step::Ops(vec![Op::Log(2)])]);
         let program = body(vec![Step::Ops(vec![
@@ -841,24 +820,18 @@ mod model_sanity {
     }
 
     #[test]
-    fn aborting_a_parent_holding_a_childs_panic_crashes() {
-        // The parent joins a child that panics; before the parent resumes
-        // to observe it, main aborts the parent.
-        let child = body(vec![Step::Panic]);
-        let parent = body(vec![Step::Join(child), Step::Ops(vec![Op::Log(9)])]);
+    fn a_panic_in_main_crashes_before_queued_work() {
         let program = body(vec![
-            Step::Ops(vec![Op::Spawn(0, parent)]),
-            Step::Yield, // parent runs and spawns child; main is re-queued
-            Step::Yield, // child panics; parent is queued after main
-            Step::Ops(vec![Op::Abort(0), Op::Log(0)]),
+            Step::Ops(vec![Op::Micro(vec![Op::Log(1)]), Op::Log(0)]),
+            Step::Panic,
         ]);
         check_outcome(&program, &[0], true);
     }
 
     #[test]
     fn aborting_a_parent_detaches_its_joined_child() {
-        // The child outlives its aborted parent; its later panic is then
-        // unobserved.
+        // The child outlives its aborted parent, and its later panic still
+        // crashes the run.
         let child = body(vec![Step::Yield, Step::Ops(vec![Op::Log(1)]), Step::Panic]);
         let parent = body(vec![Step::Join(child), Step::Ops(vec![Op::Log(9)])]);
         let program = body(vec![

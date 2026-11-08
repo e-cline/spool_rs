@@ -1,9 +1,8 @@
 //! The runtime and its event loop.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::fmt;
 use std::future::Future;
-use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -16,7 +15,7 @@ use crate::keep_alive::KeepAlive;
 use crate::park;
 use crate::queue::{Callback, Microtask, Queue};
 use crate::slab::Slab;
-use crate::task::{self, BoxFuture, JoinDyn, JoinHandle, MAIN_TASK, Payload, TaskId, TaskSlot};
+use crate::task::{self, BoxFuture, JoinDyn, JoinHandle, MAIN_TASK, TaskId, TaskSlot};
 use crate::timer::{FireAction, TimerHandle, TimerQueue};
 use crate::waker::{Shared, TaskHeader};
 
@@ -25,9 +24,6 @@ static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 const STALL_MESSAGE: &str = "spool: main future stalled: it is pending but nothing can wake it \
      (no queued work, no timers, no `KeepAlive` guards, and no wakers outside the runtime; \
      every pending task is stuck too)";
-
-const POISONED_MESSAGE: &str = "spool: this runtime is poisoned: a panic unwound out of an \
-     earlier `run` / `block_on` call on it (create a new `Runtime` instead)";
 
 /// The runtime's thread-local state. Never shared across threads.
 pub(crate) struct Inner {
@@ -38,12 +34,6 @@ pub(crate) struct Inner {
     timers: RefCell<TimerQueue>,
     clock: Rc<dyn Clock>,
     shared: Arc<Shared>,
-    /// A panic that nobody can observe (§6): re-raised out of `run` /
-    /// `block_on` at the next safe point. Only the first one is kept.
-    unobserved: Cell<Option<Payload>>,
-    /// A panic unwound out of `run` / `block_on`; the runtime can't be
-    /// driven again.
-    poisoned: Cell<bool>,
 }
 
 impl Inner {
@@ -56,8 +46,6 @@ impl Inner {
             timers: RefCell::new(TimerQueue::default()),
             clock,
             shared: Arc::new(Shared::new(id)),
-            unobserved: Cell::new(None),
-            poisoned: Cell::new(false),
         })
     }
 
@@ -133,28 +121,10 @@ impl Inner {
         drop(removed);
     }
 
-    /// Records a panic that nobody can observe. It is re-raised by
-    /// [`raise_unobserved`](Self::raise_unobserved).
-    pub(crate) fn report_unobserved(&self, payload: Payload) {
-        match self.unobserved.take() {
-            None => self.unobserved.set(Some(payload)),
-            Some(first) => {
-                // Keep the first; drop the later one outside the cell.
-                self.unobserved.set(Some(first));
-                drop(payload);
-            }
-        }
-    }
-
-    /// Re-raises an unobserved panic, if there is one. Only called at safe
-    /// points, with no borrows held.
-    fn raise_unobserved(&self) {
-        if let Some(payload) = self.unobserved.take() {
-            resume_unwind(payload);
-        }
-    }
-
     /// Polls one spawned task. Holds no `RefCell` borrow while user code runs.
+    ///
+    /// A panic in the poll isn't caught (§6): it unwinds out through here,
+    /// dropping the future (whose abort guard resolves the `JoinHandle`).
     fn poll_task(&self, id: TaskId) {
         let taken = {
             let mut tasks = self.tasks.borrow_mut();
@@ -172,19 +142,16 @@ impl Inner {
         // Clear before polling, so that a wake during the poll re-queues it.
         header.clear_scheduled();
         let waker = Waker::from(header);
-        // A panic is caught, like an exception rejecting a promise (§6).
-        let poll = catch_unwind(AssertUnwindSafe(|| {
-            future.as_mut().poll(&mut Context::from_waker(&waker))
-        }));
+        let poll = future.as_mut().poll(&mut Context::from_waker(&waker));
         drop(waker);
 
         match poll {
-            Ok(Poll::Ready(())) => {
+            Poll::Ready(()) => {
                 drop(future);
                 let slot = self.tasks.borrow_mut().remove(id);
                 drop(slot);
             }
-            Ok(Poll::Pending) => {
+            Poll::Pending => {
                 let leftover = {
                     let mut tasks = self.tasks.borrow_mut();
                     match tasks.get_mut(id) {
@@ -199,18 +166,6 @@ impl Inner {
                 };
                 drop(leftover);
             }
-            Err(payload) => {
-                let slot = self.tasks.borrow_mut().remove(id);
-                let slot = slot.expect("spool: a running task left the slab");
-                // Resolve the handle before dropping the future, so its abort
-                // guard sees the task as finished.
-                let unobserved = slot.join.reject(payload);
-                drop(slot);
-                drop(future);
-                if let Some(payload) = unobserved {
-                    self.report_unobserved(payload);
-                }
-            }
         }
     }
 
@@ -219,23 +174,17 @@ impl Inner {
     ///
     /// `poll_main` is called for each `Poll(MAIN_TASK)` entry. If it returns
     /// `true`, draining stops immediately and this returns `true`.
-    ///
-    /// An unobserved panic is re-raised before the next item runs.
     fn drain(&self, poll_main: &mut dyn FnMut() -> bool) -> bool {
-        self.raise_unobserved();
         while let Some(microtask) = self.microtasks.pop() {
             match microtask {
                 Microtask::Poll(id) if id == MAIN_TASK => {
-                    let done = poll_main();
-                    self.raise_unobserved();
-                    if done {
+                    if poll_main() {
                         return true;
                     }
                 }
                 Microtask::Poll(id) => self.poll_task(id),
                 Microtask::Callback(callback) => callback(),
             }
-            self.raise_unobserved();
         }
         false
     }
@@ -258,24 +207,13 @@ impl Inner {
     /// Returns `(fired_any, stop)`, where `stop` means `poll_main` asked to
     /// stop.
     fn run_timers(&self, poll_main: &mut dyn FnMut() -> bool) -> (bool, bool) {
-        /// Restores set-aside timers when the phase ends, even on unwind.
-        struct EndPhase<'a>(&'a RefCell<TimerQueue>);
-        impl Drop for EndPhase<'_> {
-            fn drop(&mut self) {
-                if let Ok(mut timers) = self.0.try_borrow_mut() {
-                    timers.end_phase();
-                }
-            }
-        }
-
         let now = self.clock.now();
         let cutoff = self.timers.borrow().next_seq();
-        let _end_phase = EndPhase(&self.timers);
         let mut fired_any = false;
-        loop {
+        let stop = loop {
             let next = self.timers.borrow_mut().pop_expired(now, cutoff);
             let Some(key) = next else {
-                return (fired_any, false);
+                break false;
             };
             fired_any = true;
             let (action, removed) = self.timers.borrow_mut().fire(key);
@@ -295,9 +233,13 @@ impl Inner {
                 FireAction::Nothing => {}
             }
             if self.drain(poll_main) {
-                return (true, true);
+                break true;
             }
-        }
+        };
+        // Timers armed past their deadline during the phase were set aside;
+        // they become due again.
+        self.timers.borrow_mut().end_phase();
+        (fired_any, stop)
     }
 
     /// Waits until `deadline`: lets the clock jump there if it can (a
@@ -325,30 +267,14 @@ impl Inner {
             drop(slots);
             drop(timers);
         }
-        // A panic nobody observed before the runtime went away is dropped
-        // silently: panicking inside `Drop` is not an option (§6).
-        drop(self.unobserved.take());
     }
 
     /// The shared driver behind `block_on` and `run`.
     fn drive<F: Future>(&self, future: F, mode: Mode) -> F::Output {
-        /// Poisons the runtime if a panic unwinds out of `drive`.
-        struct PoisonOnUnwind<'a>(&'a Cell<bool>);
-        impl Drop for PoisonOnUnwind<'_> {
-            fn drop(&mut self) {
-                if std::thread::panicking() {
-                    self.0.set(true);
-                }
-            }
-        }
-
-        assert!(!self.poisoned.get(), "{POISONED_MESSAGE}");
-        let _poison = PoisonOnUnwind(&self.poisoned);
-
-        // Every macrotask starts with an empty queue (D4a): flush work left over from an earlier `block_on`
-        // or spawned before this call. (A leftover `Poll(MAIN_TASK)` is a
-        // stale wake from an earlier main future; it is ignored.) This also
-        // re-raises a panic that went unobserved between calls.
+        // Every macrotask starts with an empty queue (D4a): flush work left
+        // over from an earlier `block_on` or spawned before this call. (A
+        // leftover `Poll(MAIN_TASK)` is a stale wake from an earlier main
+        // future; it is ignored.)
         self.drain(&mut || false);
 
         let mut main = MainTask {
@@ -364,7 +290,6 @@ impl Inner {
         // Main's first poll is a macrotask, like a program's top-level code
         // (D4a). Microtasks it queues run after it.
         let done = main.poll_if_pending();
-        self.raise_unobserved();
         if done && stop_when_main_done {
             return main.take_output();
         }
@@ -600,19 +525,11 @@ impl Runtime {
     ///   waker that a pending task holds for whoever awaits it (as when
     ///   `future` awaits a stuck task) doesn't count; any other waker might
     ///   be woken (from another thread, say), so the loop parks instead.
-    /// - If the runtime is poisoned (see below).
-    ///
-    /// Panics propagate like exceptions in async code. A panic unwinds out of `run`
-    /// (the runtime then stays **poisoned**: later `run` / `block_on` calls on
-    /// it panic, but a new `Runtime` works normally) when:
-    ///
-    /// - `future` itself, or a microtask or timer callback, panics;
-    /// - a task panics and nobody can observe it: its [`JoinHandle`] was
-    ///   dropped, or is dropped later without being awaited;
-    /// - a task re-throws the panic of a task it awaited, and so on up.
-    ///
-    /// A task's panic that *is* observed (by awaiting its `JoinHandle`, or
-    /// with [`try_join`](JoinHandle::try_join)) does not reach `run`.
+    /// - If `future`, any task, or any microtask or timer callback panics.
+    ///   Spool doesn't catch panics: the panic unwinds out of `run` at once
+    ///   (or, with `panic = "abort"`, ends the program). Don't drive the
+    ///   runtime again after that; drop it. See the
+    ///   [crate docs](crate#panics).
     ///
     /// ```
     /// use std::{cell::Cell, rc::Rc};

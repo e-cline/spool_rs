@@ -1,12 +1,14 @@
 # Spool — Design & Plan
 
-> Status: **Design v4.** v1 (milestones M0–M6) is implemented, and M7
-> brought it in line with v4's semantics. v4 changes direction: Spool is
+> Status: **Design v5.** v1 (milestones M0–M6) is implemented, and M7
+> brought it in line with v4's semantics. v4 changed direction: Spool is
 > *inspired by* the JavaScript event loop, not a reimplementation of Node's,
-> and it targets native and WASM equally. §11.2 lists what v4 changed, and
-> §12 has the milestones (M8 onward is the WASM work). Decisions are tagged
-> `D#`; a decision marked *(revised in v4)* or *(new in v4)* says what is
-> built so far.
+> and it targets native and WASM equally. v5 replaces the panic model with
+> one that behaves the same on every target: Spool doesn't catch panics
+> (§6). §11.2 and §11.3 list what v4 and v5 changed, and §12 has the
+> milestones (M8 onward is the WASM work). Decisions are tagged `D#`; a
+> decision marked *(revised in v4)*, *(new in v4)* or *(revised in v5)*
+> says what is built so far.
 
 Spool is a small, single-threaded Rust async executor whose scheduling model
 is inspired by the JavaScript event loop: woken tasks run as FIFO microtasks,
@@ -32,9 +34,9 @@ spawned tasks. It runs natively and in WASM (browser and WASI).
   - timers: `sleep`, `sleep_until`, `timeout`, `set_timeout`, `set_interval`, `interval`
   - microtasks: `yield_now`, `queue_microtask`
 - **Rust-idiomatic cancellation** for everything that can be cancelled (§5).
-- **Panics propagate to whoever awaits them**, like exceptions in async JS,
-  and a panic nobody observes stops the loop (§6). Native only: see §6 for
-  WASM.
+- **Panics behave the same on every target**: Spool never catches them,
+  so a panic anywhere stops the loop (§6). Recoverable errors are values
+  (`Result`), as in synchronous Rust.
 - Zero runtime dependencies on native targets. Target-specific drivers may
   depend on platform bindings behind feature flags (§7). No `unsafe` until
   the performance phase (§9.6).
@@ -99,7 +101,7 @@ pub struct Runtime;   // Runtime::builder().clock(MockClock::new()).build().bloc
 pub fn spawn<F: Future + 'static>(fut: F) -> JoinHandle<F::Output>;
 
 #[must_use = "dropping a JoinHandle detaches the task"]
-pub struct JoinHandle<T>;      // impl Future<Output = T>  (re-throws the task's panic)
+pub struct JoinHandle<T>;      // impl Future<Output = T>  (panics if the task was aborted)
 impl<T> JoinHandle<T> {
     pub fn abort(&self);                                   // cancel the task
     pub fn abort_handle(&self) -> AbortHandle;             // Clone, cancel from elsewhere
@@ -108,7 +110,7 @@ impl<T> JoinHandle<T> {
     pub fn try_join(self) -> TryJoin<T>;                   // Future<Output = Result<T, JoinError>>
 }
 pub struct AbortHandle;        // Clone; abort(&self), is_finished(&self)
-pub enum JoinError { Panicked(Box<dyn Any + Send>), Aborted }
+pub struct JoinError;          // the task was aborted (opaque: room for more causes)
 
 // ── Microtasks ──────────────────────────────────────────────────────────────
 pub fn queue_microtask(f: impl FnOnce() + 'static);
@@ -220,7 +222,6 @@ amount of work and returns, and never blocks:
 step() -> Step:
     drain_microtasks()
     absorb remote wakes (other threads) → microtask queue; drain again
-    raise any unobserved panic (§6)
 
     // timers phase
     now  = clock.now()
@@ -411,7 +412,6 @@ struct Inner {                                  // owned via Rc, !Send
     microtasks: RefCell<VecDeque<Microtask>>,
     tasks:      RefCell<Slab<TaskSlot>>,        // tiny internal slab, no dep
     timers:     RefCell<TimerQueue>,
-    unobserved_panic: Cell<Option<Box<dyn Any + Send>>>,
     clock:      Rc<dyn Clock>,
     shared:     Arc<Shared>,                    // the only thread-safe part
 }
@@ -421,7 +421,7 @@ enum Microtask { Callback(Box<dyn FnOnce()>), Poll(TaskId) }
 struct TaskSlot {
     future: Option<Pin<Box<dyn Future<Output = ()>>>>, // writes into JoinState
     header: Arc<TaskHeader>,
-    join:   Rc<dyn JoinStateDyn>,               // so panics can resolve it
+    join:   Rc<dyn JoinStateDyn>,               // the joiner's waker, for the stall check
 }
 
 struct TaskHeader {                 // Send + Sync, so it can back a std Waker
@@ -493,74 +493,92 @@ Notes:
   detached and not structured. A `JoinSet` that cancels on drop is future
   work.
 - Calling `abort()` on a task that has already finished does nothing.
-  `is_finished()` reports `true` for a task that completed, panicked, or was
-  aborted.
+  `is_finished()` reports `true` for a task that completed or was aborted.
 - Awaiting an aborted task's `JoinHandle` **panics** with "task was aborted",
   because no `T` exists. Code that may abort a task it also awaits uses
-  `try_join()` and gets `Err(JoinError::Aborted)`.
+  `try_join()` and gets `Err(JoinError)`.
 - `queue_microtask` callbacks **cannot** be cancelled. They run within the
   current step, so there is almost no window in which to cancel them.
+
+As built (M4):
+- **Resolving the handle.** The wrapped task future owns a guard. If the
+  future is dropped before it finishes (on abort, at teardown, or while a
+  panic unwinds through it), the guard marks the task aborted and wakes the
+  joiner. So abort needs no type-erased access to the join state.
+- **Self-abort.** A task that aborts itself and then completes in the same
+  poll keeps its output: it finished before its future could be dropped.
+- A **detached task's output** is dropped as soon as the task finishes.
 
 ---
 
 ## 6. Panics
 
-A panic behaves like an **exception in async code**: it travels to whoever
-awaits the task, and a panic nobody can observe stops the loop rather than
-being swallowed.
+**D11. Spool doesn't catch panics** *(revised in v5)*. A panic in `main`, in
+a task, in a microtask, or in a timer callback unwinds straight out of
+`run` / `block_on`, through whatever Spool frames are on the stack. With
+`panic = "abort"` (the default on WASM) it ends the program instead. Either
+way the loop stops at the panic: nothing else runs first. A panic is never
+delivered to a `JoinHandle`, so a task has two outcomes: its output, or
+aborted.
 
 | Situation | Spool |
 |---|---|
-| Task panics; someone awaits its `JoinHandle` | `handle.await` **re-throws** the panic in the awaiting task (`resume_unwind`) |
-| Same, using `try_join()` | Returns `Err(JoinError::Panicked(payload))` |
-| Task panics and its handle was dropped (detached) | Panic **unwinds out of `run` / `block_on`** |
-| Task panics while its handle is alive but not awaited yet | Payload is held in the handle; if the handle is later dropped without being observed, the panic unwinds out of `run` at the next safe point |
-| Callback panics (`set_timeout`, microtask) | Unwinds out of `run` / `block_on` at once |
-| `main` panics | Unwinds out of `run` / `block_on` at once |
+| A panic anywhere: `main`, a task (awaited or detached), a microtask, a timer callback | Native (`panic = "unwind"`): unwinds out of `run` / `block_on` at once. `panic = "abort"` (WASM's default): the program ends |
+| Awaiting an aborted task's `JoinHandle` | Panics with "task was aborted", an ordinary panic in the awaiting task (row above) |
 
-**D11.** How it works: each task poll is wrapped in
-`catch_unwind(AssertUnwindSafe(..))`. That costs nothing on the non-panicking
-path. A caught payload is either stored in the task's `JoinState` (if the
-handle is alive) or put in `unobserved_panic`, which the loop re-raises at a
-safe point, after all borrows are released. Callbacks are not wrapped; their
-panics unwind straight out.
+Why:
+- **The same on every target.** Catching a panic needs unwinding, which
+  WASM doesn't have by default. A model built on catching behaves one way
+  natively and another on WASM. Not catching means a panic is the same
+  thing everywhere: a bug that stops the loop.
+- **Simpler.** No `catch_unwind`, no panic payloads in the join state, no
+  re-raising at safe points, no poisoning, and nothing to explain about
+  panics nobody observed.
+- **Rust-shaped.** Recoverable errors are values: a task that can fail
+  returns a `Result`, and its joiner handles it. Code that must survive a
+  panic in one piece of work can wrap that work's future in its own
+  `catch_unwind` combinator (native only, and outside Spool).
 
-Why this is the default:
-- `JoinHandle<T>` stays `Future<Output = T>`, with no `.unwrap()` on every join,
-  and a panic still reaches the code that is waiting for the result, like `?`.
-- No panic is ever silently swallowed. Tokio does swallow panics in detached
-  tasks, and that is a common source of confusion.
+**Unwind or abort is the application's choice, not Spool's.** The panic
+strategy belongs to the final binary (its `[profile.*] panic` setting), and
+Spool doesn't override it. An application that wants native to behave
+exactly like WASM sets:
 
-**Targets** *(new in v4)*. All of this needs `panic = "unwind"`. That is the
-default on native targets. WASM targets abort on panic by default, so there
-every panic ends the program (in the browser, the instance traps), and
-`JoinError::Panicked` is never produced. Nothing in the runtime relies on
-catching a panic for correctness, so the rest of Spool works the same with
-`panic = "abort"`. The panic tests are native-only. If a WASM build turns
-on unwinding, the model works there unchanged.
+```toml
+[profile.release]
+panic = "abort"
+```
 
-Caveats (documented):
-- If the runtime is torn down while an unobserved payload is still held inside
-  a live `JoinHandle`, that payload is dropped silently, because panicking
-  inside `Drop` is not allowed. An unobserved-panic hook is future work.
-- After a panic unwinds out of `run` or `block_on`, that runtime is
-  **poisoned** and can't be reused. A fresh `Runtime` works normally.
+Spool deliberately doesn't force an abort itself (for example by calling
+`std::process::abort()` from a guard when a panic passes through):
+- It would add back panic-handling code that this model removed.
+- It would break tests. The Rust test harness needs unwinding: an aborting
+  panic inside `block_on` would kill the whole test binary, with no report
+  for that test or the rest, and `#[should_panic]` would stop working.
+  (Cargo ignores `panic = "abort"` for test builds for this reason.)
+- It would take the choice away from applications that rely on catching
+  panics, such as a server isolating each request with `catch_unwind`, or a
+  runtime on a worker thread whose panic should end only that thread.
+- An abort skips destructors (flushing buffers, removing temporary files),
+  and would also turn Spool's own panics (a stalled `main`, awaiting an
+  aborted task) into process aborts.
 
-As built (M4):
-- **Safe points.** An unobserved panic is re-raised right after the
-  microtask, task poll, or main poll that produced it, and at the start of
-  each `run` / `block_on` call (which covers a handle dropped between calls).
-  Nothing else runs first, so the loop stops at once. Only the first
-  unobserved panic is kept.
-- **Resolving the handle.** The wrapped task future owns a guard. If the
-  future is dropped before it finishes (on abort or at teardown), the guard
-  marks the task `Aborted` and wakes the joiner. A panic overrides that
-  state, since unwinding out of the `async` block already ran the guard.
-  So abort needs no type-erased access to the join state; only panics use
-  `JoinDyn`.
-- **Self-abort.** A task that aborts itself and then completes in the same
-  poll keeps its output: it finished before its future could be dropped.
-- A **detached task's output** is dropped as soon as the task finishes.
+After a panic unwinds out of `run` / `block_on` (native only):
+- Spool's state is still memory-safe (there is no `unsafe`), and dropping
+  the runtime drops every remaining task, microtask, and timer as usual.
+- The panicking task's future is dropped while it unwinds, so its
+  `JoinHandle` resolves as aborted.
+- **Don't drive that runtime again.** The interrupted step may have lost
+  work (the panicking task's slot, or timers that the timers phase had set
+  aside), so what a later `run` / `block_on` on it does is unspecified,
+  though never unsound. Spool doesn't track this (there is no poisoning);
+  it is documented. Drop it, and create a new `Runtime` if needed.
+
+*(v1–v4 caught task panics, like exceptions in async JS: `handle.await`
+re-threw them, `try_join` returned `JoinError::Panicked`, a panic nobody
+could observe was re-raised out of `run` at the next safe point, and a
+runtime a panic had escaped from was poisoned. All of that needed
+unwinding, so it only worked natively. v5 removed it.)*
 
 ---
 
@@ -594,7 +612,7 @@ Runtime::builder().clock(MockClock::new()).build()
 | Driver | thread park / unpark (`run`, `block_on`) | host callbacks (`browser::start`); next deadline via JS `setTimeout` | thread sleep (`poll_oneoff`), or the native driver if it already works |
 | Entry point | `run`, `block_on` | `browser::start(main)`, returns at once | `run`, `block_on` |
 | Remote wakes | yes | only with atomics/threads | no threads (p1) |
-| Panics | unwind (§6) | abort by default | abort by default |
+| Panics | unwind out of `run` (§6) | abort the program (the default) | abort the program (the default) |
 | Dependencies | none | `wasm-bindgen` + `js-sys`, behind feature `browser` | none expected |
 | Tests | full suite | `wasm-bindgen-test`, headless browser | full suite (minus threads) under wasmtime |
 
@@ -634,11 +652,11 @@ that coverage into the model, and removed the Node fuzzer.)*
 | Layer | Location | What it covers |
 |---|---|---|
 | **Unit tests** | `src/**` `#[cfg(test)]` | Slab generations, timer heap ordering and cancellation, queue drains, waker dedupe, the strong-count logic |
-| **Reference-model tests** | `tests/model.rs` | The oracle (D15). Random trees of `queue_microtask` / `set_timeout` / `set_interval` / cancel / `spawn` / `abort` / `yield_now` / `sleep` / join / panic operations, run on Spool (with a `MockClock`) and on the model; the traces must match. A `Busy(ms)` operation advances the clock mid-callback, to exercise late timers and skipped interval runs. *(M7 added intervals, timer cancellation, and `Busy`; v1 covered the first two only in the Node fuzzer.)* |
+| **Reference-model tests** | `tests/model.rs` | The oracle (D15). Random trees of `queue_microtask` / `set_timeout` / `set_interval` / cancel / `spawn` / `abort` / `yield_now` / `sleep` / join / panic operations, run on Spool (with a `MockClock`) and on the model; the traces must match, up to the first panic. A `Busy(ms)` operation advances the clock mid-callback, to exercise late timers and skipped interval runs. *(M7 added intervals, timer cancellation, and `Busy`; v1 covered the first two only in the Node fuzzer.)* |
 | **Ordering tests** | `tests/ordering.rs` | Hand-written scenarios with exact expected traces (§8.2) |
 | **Timer tests** | `tests/timers.rs` | `MockClock`-driven checks of deadlines, interval schedules and skipped ticks, timeouts, and zero durations; no real sleeps |
 | **Cancellation tests** | `tests/abort.rs` and others | Every row of the §5 table, plus edge cases (§8.3) |
-| **Panic tests** | `tests/panics.rs` | Every row of the §6 table, plus poisoning (native only) |
+| **Panic tests** | `tests/panics.rs` | Every row of the §6 table: each kind of panic unwinds out at once, and the runtime can still be dropped cleanly (native only) |
 | **Liveness tests** | `tests/liveness.rs`, `tests/run.rs` | `run` vs `block_on`, stall panic, remote-wake waits, background work not keeping the loop alive |
 | **Drop/leak tests** | `tests/drops.rs` | Drop-counting futures and closures check that everything is dropped exactly once, and that nothing leaks via `Rc` cycles after completion, abort, timeout, or teardown |
 | **Re-entrancy tests** | `tests/reentrancy.rs` | User code calling into the runtime from inside polls, callbacks, and `Drop` impls (§8.3) |
@@ -676,7 +694,7 @@ that coverage into the model, and removed the Node fuzzer.)*
   the same phase, or schedules a new timer with an earlier deadline.
 - `Sleep` polled with a different waker each time; `Sleep` polled after it has
   completed; a zero-duration `Sleep`.
-- A `JoinHandle` polled after it has completed; `try_join` after the task panicked.
+- A `JoinHandle` polled after it has completed; `try_join` after the task was aborted.
 - Calling the free functions outside a runtime (clear panic); a nested
   `block_on` inside a running runtime (clear panic); two runtimes one after the
   other on the same thread.
@@ -727,8 +745,7 @@ Each is judged on its own merits, with Rust names, not on whether JS has it.
 - Local (`!Send`) sync primitives: `oneshot`, `mpsc`, `Mutex`, `RwLock`,
   `Notify`, `Semaphore`.
 - A cancellation token (cancel a tree of work from one place).
-- `Builder::on_unobserved_panic` (a hook instead of crashing), and
-  `Runtime::try_block_on` returning `Result<T, Stalled>`.
+- `Runtime::try_block_on` returning `Result<T, Stalled>`.
 - `MissedTickBehavior`-style options on `interval()`, if the D7 default
   turns out not to fit some uses.
 
@@ -795,7 +812,7 @@ that the hot paths are the ones every target shares.
 | JoinHandle drop | Detach; `abort()` / `abort_on_drop()` to cancel (D10) |
 | Cancellation | Idiomatic: futures cancel on drop, handles cancel by method; no `clear_*` functions |
 | `unsafe` | None until the performance phase (§9.6) |
-| Panic model | Re-throw into the awaiter, `try_join` for `Result`, unobserved panics crash `run` (§6) |
+| Panic model | Re-throw into the awaiter, `try_join` for `Result`, unobserved panics crash `run` (§6). *Replaced in v5 (§11.3).* |
 | Microtask cancellation | Not needed; `queue_microtask` returns `()` |
 | Dev-dependencies | `proptest`, `trybuild`, `static_assertions` are approved (test-only) |
 | Toolchain | Edition 2024; the MSRV is the latest stable (1.98 at time of writing), raised freely |
@@ -816,6 +833,17 @@ that the hot paths are the ones every target shares.
 | `set_immediate` | Future work, with a check phase | Dropped; a "yield to timers" helper may replace it (§9.3) |
 | JS-specific extras (`AbortController`, `unhandledRejection`) | Future work, JS-shaped | Rust-shaped equivalents, judged on merit (§9.3) |
 
+### 11.3 Changed in v5
+
+| Topic | v1–v4 | v5 |
+|---|---|---|
+| Task panics | Caught; re-thrown by `handle.await`, returned by `try_join` | Not caught: unwind out of `run` / `block_on`, or abort (D11) |
+| Unobserved panics | Re-raised out of `run` at the next safe point | No such thing: every panic stops the loop at once |
+| After a panic escapes | The runtime is poisoned | Not tracked; don't drive it again (§6) |
+| `JoinError` | `enum { Panicked(payload), Aborted }` | An opaque struct: the task was aborted |
+| Targets | Different panic behaviour natively and on WASM | The same model everywhere (§6) |
+| Unwind vs abort | Required unwinding for the model to work | The application's `panic` setting decides; Spool never forces an abort (§6) |
+
 ---
 
 ## 12. Milestones
@@ -826,11 +854,12 @@ that the hot paths are the ones every target shares.
 | M1 | Core loop | done | `Runtime`, `block_on`, context, task slab, `Wake`-based waker, microtask queue, `spawn`, `JoinHandle`, `yield_now` |
 | M2 | Queues | done | `queue_microtask`, `next_tick`, drain semantics, reference model + `proptest`, basic `run` |
 | M3 | Timers | done | `Clock`, `MockClock`, timer heap, `sleep`, `sleep_until`, `timeout`, `timeout_at`, `set_timeout`, `set_interval`, `interval`, `TimerHandle::cancel` |
-| M4 | Cancellation & panics | done | `abort`, `AbortHandle`, `abort_on_drop`, `try_join`, the panic model, poisoning |
+| M4 | Cancellation & panics | done | `abort`, `AbortHandle`, `abort_on_drop`, `try_join`, the v1 panic model and poisoning (replaced in M7.5) |
 | M5 | Liveness & threads | done | `KeepAlive`, stall-detection hardening, remote wakes, the Node fuzzer |
 | M6 | Polish | done | Rustdoc guide, examples, stress tests, benchmarks (§9.6 baseline), coverage gate |
 | M7 | Realign with v4 | done | Remove `next_tick` and the tick queue (D12), from the API, the model, tests, docs, and examples. New interval semantics (D7) for `set_interval` and `interval()`, with model and timer tests for skipped ticks. Extend the reference model with intervals and timer cancellation (D15), then remove the Node fuzzer; trim `node_parity` to the optional comparison and drop `SPOOL_REQUIRE_NODE` and the Node install from CI. Reword the crate docs, README, and examples from "matches Node" to "inspired by JS". Update the "§8.2 scenario N" references in the tests to the v4 numbering. |
-| M8 | Non-blocking core | | Split `drive()` into `step()` (D5) and a native driver; make main a resumable task; per-target default clock (D13); per-target panic docs (§6); `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1` in CI. Settle the public-`step()` question (§10). No behavior change on native: the full suite must pass unchanged. |
+| M7.5 | Simpler panics (v5) | done | Remove `catch_unwind`, the panicked join state, unobserved-panic re-raising, and poisoning (D11). `JoinError` becomes an opaque "aborted" struct. Rewrite the panic tests, the model's panic handling, the docs, and the `panics` example for the new model. |
+| M8 | Non-blocking core | | Split `drive()` into `step()` (D5) and a native driver; make main a resumable task; per-target default clock (D13); `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1` in CI. Settle the public-`step()` question (§10). No behavior change on native: the full suite must pass unchanged. |
 | M9 | Browser | | Feature `browser`: `PerformanceClock`, the host-callback driver (D14), `browser::start`, an example page, and the suite (minus threads and panics) under `wasm-bindgen-test` in a headless browser in CI. |
 | M10 | WASI | | Make the suite (minus threads) pass under wasmtime on `wasm32-wasip1` (and `-wasip2` if it is no extra work), adding a WASI driver only if the native one doesn't work there; add it to CI. |
 | M11 | Performance | | §9.6, measured against `BENCHMARKS.md`. |

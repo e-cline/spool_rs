@@ -131,16 +131,15 @@ fn aborted_task_is_dropped_once_and_leaves_no_cycle() {
 fn panicked_task_leaves_no_cycle() {
     let rc = Rc::new(());
     let weak = Rc::downgrade(&rc);
-    let err = spool::block_on(async move {
-        spool::spawn(async move {
-            let _rc = rc;
-            spool::yield_now().await;
-            panic!("cycle check");
-        })
-        .try_join()
-        .await
+    let rt = spool::Runtime::new();
+    let handle = rt.spawn(async move {
+        let _rc = rc;
+        spool::yield_now().await;
+        panic!("cycle check");
     });
-    assert!(err.is_err());
+    let _ = common::expect_panic(|| rt.block_on(spool::yield_now()));
+    assert!(weak.upgrade().is_none(), "dropped while unwinding");
+    drop((handle, rt));
     assert!(weak.upgrade().is_none());
 }
 

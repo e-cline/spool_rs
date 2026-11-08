@@ -36,7 +36,7 @@ fn abort_drops_an_idle_task_immediately() {
         h.abort();
         assert_eq!(c.count(), 1, "dropped synchronously by abort()");
         assert!(h.is_finished());
-        assert!(matches!(h.try_join().await, Err(JoinError::Aborted)));
+        assert!(h.try_join().await.is_err());
     });
 }
 
@@ -47,7 +47,7 @@ fn abort_before_the_first_poll_means_it_never_runs() {
     spool::run(async move {
         let h = spool::spawn(async move { r.set(true) });
         h.abort();
-        assert!(h.try_join().await.unwrap_err().is_aborted());
+        assert!(h.try_join().await.is_err());
     });
     assert!(!ran.get());
 }
@@ -65,15 +65,16 @@ fn awaiting_an_aborted_handle_panics() {
 }
 
 #[test]
-fn the_aborted_panic_is_rethrown_through_an_awaiting_task() {
-    spool::block_on(async {
-        let inner = spool::spawn(never());
-        inner.abort();
-        let outer = spool::spawn(async move { inner.await });
-        let err = outer.try_join().await.unwrap_err();
-        assert!(err.is_panic());
-        assert!(err.to_string().contains("task was aborted"), "{err}");
+fn the_aborted_panic_in_an_awaiting_task_unwinds_out() {
+    let msg = expect_panic(|| {
+        spool::block_on(async {
+            let inner = spool::spawn(never());
+            inner.abort();
+            let outer = spool::spawn(async move { inner.await });
+            outer.await;
+        })
     });
+    assert!(msg.contains("task was aborted"), "{msg}");
 }
 
 #[test]
@@ -96,7 +97,7 @@ fn abort_is_idempotent() {
         h.abort();
         h.abort();
         a.abort();
-        assert!(h.try_join().await.unwrap_err().is_aborted());
+        assert!(h.try_join().await.is_err());
     });
 }
 
@@ -150,7 +151,7 @@ fn a_remote_wake_after_abort_is_ignored() {
     std::thread::spawn(move || tx.send(1)).join().unwrap();
     let next = rt.spawn(async { 2 });
     assert_eq!(rt.block_on(next), 2);
-    assert!(rt.block_on(h.try_join()).unwrap_err().is_aborted());
+    assert!(rt.block_on(h.try_join()).is_err());
 }
 
 #[test]
@@ -170,7 +171,7 @@ fn abort_wakes_a_task_awaiting_the_handle() {
         abort.abort();
         watcher.await;
     });
-    trace.assert(&["aborting", "watcher saw Err(Aborted)"]);
+    trace.assert(&["aborting", "watcher saw Err(JoinError(Aborted))"]);
 }
 
 #[test]
@@ -212,7 +213,7 @@ fn abort_from_a_timer_callback() {
         let _t = spool::set_timeout(Duration::from_secs(1), move || a.abort());
         h.try_join().await
     });
-    assert!(out.unwrap_err().is_aborted());
+    assert!(out.is_err());
     assert_eq!(clock.elapsed(), Duration::from_secs(1));
 }
 
@@ -253,7 +254,10 @@ fn a_task_can_abort_itself() {
         let result = h.try_join().await;
         t.log(format!("{result:?}, dropped={}", c.count()));
     });
-    trace.assert(&["after abort, dropped=0", "Err(Aborted), dropped=1"]);
+    trace.assert(&[
+        "after abort, dropped=0",
+        "Err(JoinError(Aborted)), dropped=1",
+    ]);
     assert_eq!(counter.count(), 1);
 }
 
@@ -299,7 +303,11 @@ fn a_task_can_abort_the_task_awaiting_it() {
         t.log(format!("awaiter: {result:?}"));
         spool::yield_now().await;
     });
-    trace.assert(&["inner kept running", "awaiter: Err(Aborted)", "inner done"]);
+    trace.assert(&[
+        "inner kept running",
+        "awaiter: Err(JoinError(Aborted))",
+        "inner done",
+    ]);
 }
 
 // ── AbortHandle ─────────────────────────────────────────────────────────────
@@ -362,7 +370,7 @@ fn tasks_dropped_with_their_runtime_resolve_as_aborted() {
     drop(rt);
     // `TryJoin` doesn't need the task's runtime to report the result.
     let result = spool::block_on(h.try_join());
-    assert!(result.unwrap_err().is_aborted());
+    assert!(result.is_err());
 }
 
 // ── abort_on_drop ───────────────────────────────────────────────────────────
@@ -430,7 +438,7 @@ fn abort_on_drop_explicit_abort_and_try_join() {
     spool::block_on(async {
         let guard = spool::spawn(never()).abort_on_drop();
         guard.abort();
-        assert!(guard.try_join().await.unwrap_err().is_aborted());
+        assert!(guard.try_join().await.is_err());
     });
 }
 
@@ -476,7 +484,7 @@ fn try_join_abort() {
         tj.abort();
         assert!(tj.is_finished());
         assert!(format!("{tj:?}").contains("finished: true"));
-        assert!(tj.await.unwrap_err().is_aborted());
+        assert!(tj.await.is_err());
     });
 }
 
@@ -547,22 +555,12 @@ fn drop_during_abort_can_abort_another_task() {
 
 #[test]
 fn join_error_display_and_debug() {
-    assert_eq!(JoinError::Aborted.to_string(), "task was aborted");
-    assert_eq!(format!("{:?}", JoinError::Aborted), "Aborted");
-    let err = JoinError::Panicked(Box::new("boom"));
-    assert_eq!(err.to_string(), "task panicked: boom");
-    assert_eq!(format!("{err:?}"), "Panicked(\"boom\")");
-    let err = JoinError::Panicked(Box::new(String::from("owned")));
-    assert_eq!(err.to_string(), "task panicked: owned");
-    let err = JoinError::Panicked(Box::new(42_u8));
-    assert_eq!(err.to_string(), "task panicked");
-    assert_eq!(format!("{err:?}"), "Panicked(..)");
-    assert!(err.is_panic() && !err.is_aborted());
-    assert_eq!(*err.try_into_panic().unwrap().downcast::<u8>().unwrap(), 42);
-    assert!(
-        JoinError::Aborted
-            .try_into_panic()
-            .unwrap_err()
-            .is_aborted()
-    );
+    let err: JoinError = spool::block_on(async {
+        let h = spool::spawn(never());
+        h.abort();
+        h.try_join().await.unwrap_err()
+    });
+    assert_eq!(err.to_string(), "task was aborted");
+    assert_eq!(format!("{err:?}"), "JoinError(Aborted)");
+    let _: &dyn std::error::Error = &err;
 }

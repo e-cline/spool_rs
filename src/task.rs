@@ -1,10 +1,8 @@
 //! Tasks, `spawn`, `JoinHandle`, and cancellation (`abort`).
 
-use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::future::Future;
-use std::panic::resume_unwind;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -24,9 +22,6 @@ pub(crate) const MAIN_TASK: TaskId = Key::SENTINEL;
 /// A type-erased task future. Its output is written into a [`JoinCell`].
 pub(crate) type BoxFuture = Pin<Box<dyn Future<Output = ()>>>;
 
-/// A caught panic.
-pub(crate) type Payload = Box<dyn Any + Send + 'static>;
-
 /// A task's entry in the runtime's slab.
 pub(crate) struct TaskSlot {
     /// `None` while the task is being polled.
@@ -34,7 +29,7 @@ pub(crate) struct TaskSlot {
     /// The slab holds exactly one strong reference; every other reference is
     /// an outstanding `Waker`.
     pub(crate) header: Arc<TaskHeader>,
-    /// Where a panic during a poll is delivered.
+    /// The task's join state, which the stall check reads.
     pub(crate) join: Rc<dyn JoinDyn>,
     /// `abort()` was called while the task was being polled: drop the future
     /// as soon as the poll returns.
@@ -46,9 +41,8 @@ enum JoinState<T> {
     Pending { waker: Option<Waker> },
     /// Finished; the output is waiting to be taken.
     Ready(T),
-    /// The task panicked; the payload is waiting to be observed.
-    Panicked(Payload),
-    /// The task was aborted (or dropped with its runtime) before finishing.
+    /// The task was aborted (or dropped with its runtime, or unwound by a
+    /// panic) before finishing.
     Aborted,
     /// The result was taken by awaiting the handle.
     Consumed,
@@ -79,11 +73,6 @@ impl<T> JoinCell<T> {
 
 /// The type-erased side of a [`JoinCell`] that the runtime needs.
 pub(crate) trait JoinDyn {
-    /// Delivers a panic from the task's poll. Returns the payload back if
-    /// nobody can observe it (the handle was dropped): it is then an
-    /// unobserved panic.
-    fn reject(&self, payload: Payload) -> Option<Payload>;
-
     /// The data pointer of the waker stored by whoever awaits this task's
     /// handle, if any. That waker can only fire once this task finishes,
     /// which the stall check (§3.5) uses.
@@ -91,24 +80,6 @@ pub(crate) trait JoinDyn {
 }
 
 impl<T> JoinDyn for JoinCell<T> {
-    fn reject(&self, payload: Payload) -> Option<Payload> {
-        if self.detached.get() {
-            *self.state.borrow_mut() = JoinState::Consumed;
-            return Some(payload);
-        }
-        // Unwinding out of the task's `async` block already dropped its
-        // locals, including the abort guard, which marked the task aborted
-        // (and woke the joiner). The panic is the real outcome.
-        let previous =
-            std::mem::replace(&mut *self.state.borrow_mut(), JoinState::Panicked(payload));
-        match previous {
-            JoinState::Pending { waker: Some(waker) } => waker.wake(),
-            JoinState::Pending { waker: None } | JoinState::Aborted => {}
-            _ => unreachable!("spool: a task panicked after it finished"),
-        }
-        None
-    }
-
     fn joiner_waker_data(&self) -> Option<*const ()> {
         match &*self.state.borrow() {
             JoinState::Pending { waker: Some(waker) } => Some(waker.data()),
@@ -118,8 +89,8 @@ impl<T> JoinDyn for JoinCell<T> {
 }
 
 /// Lives inside the task's future. If the future is dropped before the task
-/// finished (abort, or runtime teardown), it marks the task aborted and wakes
-/// the joiner.
+/// finished (abort, runtime teardown, or a panic unwinding through it), it
+/// marks the task aborted and wakes the joiner.
 struct AbortGuard<T>(Rc<JoinCell<T>>);
 
 impl<T> Drop for AbortGuard<T> {
@@ -196,17 +167,14 @@ where
 ///
 /// # Panics
 ///
-/// Awaiting a `JoinHandle` behaves like awaiting a JS promise:
-///
-/// - If the task **panicked**, the panic is re-thrown in the awaiting task
-///   (with [`resume_unwind`]). Use [`try_join`](Self::try_join) to get it as
-///   an `Err` instead.
 /// - If the task was **aborted**, awaiting panics with "task was aborted".
+///   Use [`try_join`](Self::try_join) to get an `Err` instead.
 /// - Polling the handle again after it returned panics.
 ///
-/// If the task panics and its handle is dropped without the panic being
-/// observed, the panic unwinds out of `run` / `block_on`, rather than being
-/// silently swallowed.
+/// A panic *inside* the task is not delivered here: Spool doesn't catch
+/// panics, so it unwinds out of `run` / `block_on` (see the
+/// [crate docs](crate#panics)). A task that can fail should return a
+/// `Result`.
 ///
 /// # Example
 ///
@@ -225,8 +193,7 @@ pub struct JoinHandle<T> {
 }
 
 impl<T> JoinHandle<T> {
-    /// Returns `true` if the task has finished: it completed, panicked, or
-    /// was aborted.
+    /// Returns `true` if the task has finished: it completed or was aborted.
     ///
     /// ```
     /// spool::block_on(async {
@@ -246,8 +213,7 @@ impl<T> JoinHandle<T> {
     /// spool::block_on(async {
     ///     let task = spool::spawn(std::future::pending::<()>());
     ///     task.abort();
-    ///     let err = task.try_join().await.unwrap_err();
-    ///     assert!(err.is_aborted());
+    ///     assert!(task.try_join().await.is_err());
     /// });
     /// ```
     pub fn abort(&self) {
@@ -280,14 +246,15 @@ impl<T> JoinHandle<T> {
         AbortOnDrop { handle: self }
     }
 
-    /// Waits for the task without re-throwing: returns `Err` if the task
-    /// panicked or was aborted, like `try { await p } catch (e) { ... }`.
+    /// Waits for the task without panicking if it was aborted: returns
+    /// `Err(JoinError)` instead.
     ///
     /// ```
     /// spool::block_on(async {
-    ///     let handle = spool::spawn(async { panic!("oh no") });
+    ///     let handle = spool::spawn(std::future::pending::<()>());
+    ///     handle.abort();
     ///     let err = handle.try_join().await.unwrap_err();
-    ///     assert!(err.is_panic());
+    ///     assert_eq!(err.to_string(), "task was aborted");
     /// });
     /// ```
     pub fn try_join(self) -> TryJoin<T> {
@@ -307,8 +274,7 @@ impl<T> JoinHandle<T> {
             JoinState::Consumed => panic!("spool: `JoinHandle` polled after it completed"),
             _ => match std::mem::replace(&mut *state, JoinState::Consumed) {
                 JoinState::Ready(output) => Poll::Ready(Ok(output)),
-                JoinState::Panicked(payload) => Poll::Ready(Err(JoinError::Panicked(payload))),
-                JoinState::Aborted => Poll::Ready(Err(JoinError::Aborted)),
+                JoinState::Aborted => Poll::Ready(Err(JoinError(()))),
                 JoinState::Pending { .. } | JoinState::Consumed => unreachable!(),
             },
         }
@@ -322,8 +288,7 @@ impl<T> Future for JoinHandle<T> {
         match self.poll_result(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(output)) => Poll::Ready(output),
-            Poll::Ready(Err(JoinError::Panicked(payload))) => resume_unwind(payload),
-            Poll::Ready(Err(JoinError::Aborted)) => {
+            Poll::Ready(Err(_)) => {
                 panic!("spool: task was aborted (use `try_join` to handle this)")
             }
         }
@@ -344,16 +309,7 @@ impl<T> Drop for JoinHandle<T> {
                 _ => std::mem::replace(&mut *state, JoinState::Consumed),
             }
         };
-        match old {
-            // A panic nobody observed: hand it to the runtime, which
-            // re-raises it. If the runtime is gone, it is dropped silently.
-            JoinState::Panicked(payload) => {
-                if let Some(inner) = self.task.inner.upgrade() {
-                    inner.report_unobserved(payload);
-                }
-            }
-            other => drop(other),
-        }
+        drop(old);
         if self.abort_on_drop {
             self.task.abort();
         }
@@ -386,7 +342,7 @@ impl<T> fmt::Debug for JoinHandle<T> {
 ///     // A watchdog that cancels the worker after 5s.
 ///     let abort = worker.abort_handle();
 ///     spool::set_timeout(Duration::from_secs(5), move || abort.abort());
-///     assert!(worker.try_join().await.unwrap_err().is_aborted());
+///     assert!(worker.try_join().await.is_err());
 ///     assert_eq!(spool::now().epoch_offset(), Duration::from_secs(5));
 /// });
 /// ```
@@ -407,7 +363,7 @@ impl AbortHandle {
     /// - If the task already finished, this does nothing.
     ///
     /// Awaiting an aborted task's `JoinHandle` panics; use
-    /// [`try_join`](JoinHandle::try_join) to get `Err(JoinError::Aborted)`.
+    /// [`try_join`](JoinHandle::try_join) to get `Err(JoinError)`.
     /// Tasks spawned by the aborted task are *not* aborted.
     pub fn abort(&self) {
         if let Some(inner) = self.inner.upgrade() {
@@ -415,8 +371,8 @@ impl AbortHandle {
         }
     }
 
-    /// Returns `true` if the task has finished: it completed, panicked, or
-    /// was aborted (or its runtime was dropped).
+    /// Returns `true` if the task has finished: it completed or was aborted
+    /// (or its runtime was dropped).
     pub fn is_finished(&self) -> bool {
         self.inner
             .upgrade()
@@ -507,7 +463,7 @@ impl<T> fmt::Debug for AbortOnDrop<T> {
 }
 
 /// The future returned by [`JoinHandle::try_join`]: the task's output, or a
-/// [`JoinError`] if it panicked or was aborted.
+/// [`JoinError`] if it was aborted.
 ///
 /// ```
 /// spool::block_on(async {
@@ -552,90 +508,32 @@ impl<T> fmt::Debug for TryJoin<T> {
     }
 }
 
-/// Why a task produced no output, returned by [`JoinHandle::try_join`].
+/// Why a task produced no output, returned by [`JoinHandle::try_join`]: it
+/// was aborted before it finished.
+///
+/// The only cause today is an abort (including the task's runtime being
+/// dropped, or a panic unwinding through the task). It is opaque so that
+/// more causes can be added later.
 ///
 /// ```
-/// use spool::JoinError;
-///
 /// spool::block_on(async {
-///     match spool::spawn(async { panic!("bad input") }).try_join().await {
-///         Ok(()) => unreachable!(),
-///         Err(JoinError::Panicked(payload)) => {
-///             assert_eq!(payload.downcast_ref::<&str>(), Some(&"bad input"));
-///             // Or re-throw it: std::panic::resume_unwind(payload).
-///         }
-///         Err(JoinError::Aborted) => unreachable!(),
-///     }
+///     let task = spool::spawn(std::future::pending::<()>());
+///     task.abort();
+///     let err = task.try_join().await.unwrap_err();
+///     assert_eq!(err.to_string(), "task was aborted");
 /// });
 /// ```
-pub enum JoinError {
-    /// The task panicked. Holds the panic payload, which can be re-thrown
-    /// with [`std::panic::resume_unwind`].
-    Panicked(Box<dyn Any + Send + 'static>),
-    /// The task was aborted before it finished.
-    Aborted,
-}
-
-impl JoinError {
-    /// Returns `true` if the task panicked.
-    pub fn is_panic(&self) -> bool {
-        matches!(self, JoinError::Panicked(_))
-    }
-
-    /// Returns `true` if the task was aborted.
-    pub fn is_aborted(&self) -> bool {
-        matches!(self, JoinError::Aborted)
-    }
-
-    /// Returns the panic payload, or `Err(self)` if the task was aborted.
-    ///
-    /// ```
-    /// spool::block_on(async {
-    ///     let err = spool::spawn(async { panic!("boom") }).try_join().await.unwrap_err();
-    ///     let payload = err.try_into_panic().ok().unwrap();
-    ///     assert_eq!(payload.downcast_ref::<&str>(), Some(&"boom"));
-    /// });
-    /// ```
-    pub fn try_into_panic(self) -> Result<Box<dyn Any + Send + 'static>, JoinError> {
-        match self {
-            JoinError::Panicked(payload) => Ok(payload),
-            JoinError::Aborted => Err(self),
-        }
-    }
-
-    /// The panic message, if the task panicked with a string message.
-    fn panic_message(&self) -> Option<&str> {
-        match self {
-            JoinError::Panicked(payload) => payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| payload.downcast_ref::<String>().map(String::as_str)),
-            JoinError::Aborted => None,
-        }
-    }
-}
+pub struct JoinError(());
 
 impl fmt::Debug for JoinError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            JoinError::Panicked(_) => match self.panic_message() {
-                Some(msg) => f.debug_tuple("Panicked").field(&msg).finish(),
-                None => f.write_str("Panicked(..)"),
-            },
-            JoinError::Aborted => f.write_str("Aborted"),
-        }
+        f.write_str("JoinError(Aborted)")
     }
 }
 
 impl fmt::Display for JoinError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            JoinError::Panicked(_) => match self.panic_message() {
-                Some(msg) => write!(f, "task panicked: {msg}"),
-                None => f.write_str("task panicked"),
-            },
-            JoinError::Aborted => f.write_str("task was aborted"),
-        }
+        f.write_str("task was aborted")
     }
 }
 
