@@ -106,6 +106,8 @@ pub async fn yield_now();            // ≈ `await null` / `await Promise.resolv
 pub fn sleep(d: Duration) -> Sleep;                       // Future<Output = ()>
 pub fn sleep_until(deadline: Instant) -> Sleep;
 pub fn timeout<F: Future>(d: Duration, f: F) -> Timeout<F>; // Output = Result<F::Output, Elapsed>
+pub fn timeout_at<F: Future>(deadline: Instant, f: F) -> Timeout<F>;
+pub fn now() -> Instant;                                  // the current runtime's clock
 pub fn interval(period: Duration) -> Interval;            // async fn tick(&mut self) -> Instant
 
 // ── Timers: callback-style (handle drop = keep running; .cancel() = cancel) ─
@@ -235,18 +237,32 @@ target possible later, and it is where the I/O reactor plugs in.
 - **D6. No 1ms clamp.** Node treats `setTimeout(0)` as 1ms; Spool doesn't. The
   `seq0` snapshot still gives the behavior that matters: a timer scheduled
   *during* the timers phase runs in the **next** turn, so a timer that re-arms
-  itself can't starve the loop.
-- **D7. Interval semantics follow Node.** After an interval's callback runs,
-  the interval re-arms at `now + period`. Missed ticks are not replayed in a
-  burst, so a slow callback causes drift, not a pile-up. `set_interval` and
-  `interval()` behave the same way. `interval().tick()` completes immediately
-  the first time, as in Tokio.
+  itself can't starve the loop. *(M3 detail: a timer armed mid-phase with a
+  deadline in the past, via `sleep_until`, sorts to the top of the heap. It is
+  set aside for the rest of the phase so that it can't block older due timers
+  behind it.)*
+- **D7. Interval semantics follow Node.** When an interval fires, it re-arms
+  at *the timers phase's start time* + `period` (Node re-arms from the loop's
+  cached time, read before the callback runs). The time the callback itself
+  takes doesn't shift the schedule. But a late timers phase (for example,
+  after another slow callback) makes the interval drift, and missed ticks are
+  never replayed in a burst. `interval()` behaves the same way: each tick is
+  due `period` after the previous tick completed. `interval().tick()`
+  completes immediately the first time, as in Tokio. *(Refined in M3.)*
 - `set_interval`'s callback receives `&TimerHandle`, so it can cancel itself
   without the `Rc<Cell<Option<Handle>>>` workaround.
 - A zero `period` panics, because it would make an infinite loop of
   macrotasks. Node clamps it to 1ms instead.
-- `Sleep` registers itself lazily on first poll and keeps only the latest
-  `Waker`.
+- **D7a. Timers start when they are created.** `sleep(d)` arms its timer
+  right away, like `setTimeout`, rather than on first poll. So an un-awaited
+  `Sleep` keeps `run` alive until its deadline (or until it is dropped), and
+  timers created in sequence fire in creation order. A `Sleep` keeps only the
+  latest `Waker`. Even `sleep(Duration::ZERO)` waits for the next timers
+  phase. *(Settled in M3.)*
+- **Equal deadlines race in creation order**, as with `Promise.race` over two
+  `setTimeout`s. `timeout(d, fut)` arms its own timer when it is called, so it
+  beats a `sleep(d)` that `fut` creates later. If the inner future and the
+  deadline are both ready at the same poll, the output wins.
 
 ### 3.5 Liveness, exit, and stalls
 
@@ -474,22 +490,28 @@ Caveats (documented):
 ## 7. Clock and park
 
 ```rust
-pub struct Instant(Duration);   // offset from the runtime's epoch; wasm-safe
-pub trait Clock { fn now(&self) -> Instant; }
-trait Park {
-    fn park(&mut self, timeout: Option<Duration>);
-    fn unparker(&self) -> Arc<dyn Unpark>;     // Send + Sync
+pub struct Instant(Duration);   // offset from the clock's epoch; wasm-safe
+pub trait Clock {
+    fn now(&self) -> Instant;
+    // Called when idle until `deadline`; return true if the clock jumped
+    // there itself (MockClock), so the runtime shouldn't sleep.
+    fn advance_when_idle(&self, deadline: Instant) -> bool { false }
 }
+Runtime::builder().clock(MockClock::new()).build()
 ```
 
 - `SystemClock` is backed by `std::time::Instant`. Spool has its own `Instant`
   type because `std`'s panics on `wasm32-unknown-unknown`.
-- `MockClock` stays frozen until the test advances it. When the loop would
-  otherwise park, it can **auto-advance** to the next timer deadline (like
-  Tokio's `start_paused`), so timer tests are instant and deterministic.
-  `MockClock::advance(d)` can also be called from inside a test.
-- `ThreadPark` is built on `std::thread::park_timeout`. With `MockClock`, a
-  park that has a deadline turns into "advance the clock" instead of sleeping.
+- `MockClock` stays frozen until something advances it. When the loop would
+  otherwise sleep until the next timer, it **always auto-advances** to that
+  deadline (like Tokio's `start_paused`), so timer tests are instant and
+  deterministic. Tests can also call `MockClock::advance(d)`, for example
+  from inside a callback to simulate a slow one. *(M3: there's no
+  "manual-only" mode. A frozen clock with nothing left to advance it would
+  hang the loop.)*
+- Parking (`src/park.rs`) is a plain function on top of
+  `std::thread::park` / `park_timeout`. The `Park` trait is left for the I/O
+  reactor milestone, which will need more than one implementation.
 
 ---
 
@@ -636,6 +658,8 @@ pass may switch to `unsafe` in the hot paths where it is clearly worth it:
   `VecDeque<Microtask>` + `BinaryHeap` and the lazy-deletion scheme. That gives
   O(1) cancellation with no tombstones.
 - A hierarchical timer wheel, if timer-heavy benchmarks show it helps.
+- Unboxed `Timeout<F>`: pin-project the inner future instead of boxing it
+  (v1 boxes it to stay free of `unsafe`).
 - A local-wake fast path that avoids atomics where it's sound.
 
 Each change must keep the full test suite and Miri passing, and must show a
@@ -684,7 +708,7 @@ None that block implementation.
 | M0 | Scaffold | Crate, CI matrix, lint/fmt/doc gates, test harness skeleton, Node-parity runner |
 | M1 | Core loop | `Runtime`, `block_on`, context, task slab, `Wake`-based waker, microtask queue, `spawn`, `JoinHandle`, `yield_now`, plus their unit and re-entrancy tests |
 | M2 | JS queues | `queue_microtask`, `next_tick`, drain semantics; ordering scenarios 1, 2, 6, 9, 10; reference model + `proptest`; basic `run` (queues-only liveness, pulled forward from M5 so Node parity scenarios can run to completion) |
-| M3 | Timers | `Clock`, `MockClock`, `ThreadPark`, timer heap, `sleep`, `sleep_until`, `timeout`, `set_timeout`, `set_interval`, `interval`; scenarios 3–5, 7, 8; timer tests |
-| M4 | Cancellation & panics | `abort`, `AbortHandle`, `abort_on_drop`, `try_join`, `TimerHandle::cancel`, `catch_unwind` + unobserved-panic path, poisoning; cancel, panic, and drop/leak tests |
+| M3 | Timers | `Clock`, `MockClock`, parking with a deadline, timer heap, `sleep`, `sleep_until`, `timeout`, `timeout_at`, `set_timeout`, `set_interval`, `interval`, `TimerHandle::cancel` (pulled forward from M4, since `set_interval` needs it); scenarios 3–5, 7, 8; timer tests; timers added to the reference model |
+| M4 | Cancellation & panics | `abort`, `AbortHandle`, `abort_on_drop`, `try_join`, `catch_unwind` + unobserved-panic path, poisoning; cancel, panic, and drop/leak tests |
 | M5 | Liveness & threads | Full liveness for `run` (timers, `KeepAlive`), stall-detection hardening, remote wakes; liveness and thread tests; randomized Node differential tests |
 | M6 | Polish | Rustdoc with JS-equivalence tables, examples, stress tests, benchmarks (spawn, wake, timer throughput) to give §9.6 a baseline, coverage gate |

@@ -9,20 +9,29 @@ JavaScript / Node.js event-loop semantics.
 - Zero runtime dependencies, no `unsafe`.
 
 ```rust
-let answer = spool::block_on(async {
+use std::time::Duration;
+
+spool::run(async {
+    spool::set_timeout(Duration::from_millis(40), || println!("timeout 40ms"));
+    spool::queue_microtask(|| println!("microtask"));
+    spool::next_tick(|| println!("nextTick"));
+    println!("sync");
+
     let task = spool::spawn(async {
-        spool::yield_now().await;
-        6 * 7
+        spool::sleep(Duration::from_millis(10)).await;
+        42
     });
-    task.await
+    println!("joined: {}", task.await);
 });
-assert_eq!(answer, 42);
+// Prints, exactly as the equivalent Node program does:
+// sync, nextTick, microtask, joined: 42, timeout 40ms
 ```
 
-> **Status:** early development. Milestones M0 (scaffold), M1 (core loop:
-> `block_on`, `spawn`, `JoinHandle`, `yield_now`), and M2 (`queue_microtask`,
-> `next_tick`, Node's drain order, `run`) are implemented. Timers,
-> cancellation, and the rest of the plan are next. See
+> **Status:** early development. Implemented so far: M0 (scaffold), M1 (core
+> loop: `block_on`, `spawn`, `JoinHandle`, `yield_now`), M2 (`queue_microtask`,
+> `next_tick`, Node's drain order, `run`), and M3 (timers: `sleep`,
+> `timeout`, `interval`, `set_timeout`, `set_interval`, `MockClock`). Next up
+> are task cancellation and the panic model. See
 > [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md).
 
 ## Development

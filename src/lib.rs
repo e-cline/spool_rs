@@ -7,7 +7,11 @@
 //!   hold `Rc`, `RefCell`, and `Cell`.
 //! - **Predictable, Node-like ordering.** A woken task is queued as a
 //!   microtask, in FIFO order, just like the code after an `await` in JS.
-//!   [`next_tick`] callbacks run before microtasks, as in Node.
+//!   [`next_tick`] callbacks run before microtasks, and timers run one at a
+//!   time, with both queues drained after each, as in Node.
+//! - **Deterministic tests.** A [`MockClock`] makes timers fire instantly, in
+//!   a fixed order.
+//! - **Zero dependencies** and no `unsafe` code.
 //!
 //! | Spool | JS / Node |
 //! |---|---|
@@ -16,11 +20,16 @@
 //! | [`yield_now`]`().await` | `await null` |
 //! | [`queue_microtask`] | `queueMicrotask` |
 //! | [`next_tick`] | `process.nextTick` |
+//! | [`set_timeout`] / [`TimerHandle::cancel`] | `setTimeout` / `clearTimeout` |
+//! | [`set_interval`] / [`TimerHandle::cancel`] | `setInterval` / `clearInterval` |
+//! | [`sleep`]`(d).await` | `await new Promise(r => setTimeout(r, ms))` |
 //!
-//! One inherent difference: in JS, `await` always takes a microtask hop. In
-//! Rust, `.await` on a future that is already ready (such as the
-//! [`JoinHandle`] of a finished task) continues without one.
-//! - **Zero dependencies** and no `unsafe` code.
+//! Two differences from JS:
+//! - In JS, `await` always takes a microtask hop. In Rust, `.await` on a
+//!   future that is already ready (such as the [`JoinHandle`] of a finished
+//!   task) continues without one.
+//! - Node clamps timer delays to at least 1ms. Spool doesn't, but a zero
+//!   delay still waits for the next timers phase.
 //!
 //! ```
 //! use std::{cell::RefCell, rc::Rc};
@@ -50,15 +59,23 @@
 
 #![warn(unreachable_pub)]
 
+mod clock;
 mod context;
+mod park;
 mod queue;
 mod runtime;
 mod slab;
 mod task;
+mod timer;
 mod waker;
 mod yield_now;
 
+pub use clock::{Clock, Instant, MockClock, SystemClock, now};
 pub use queue::{next_tick, queue_microtask};
-pub use runtime::{Runtime, block_on, run};
+pub use runtime::{Builder, Runtime, block_on, run};
 pub use task::{JoinHandle, spawn};
+pub use timer::{
+    Elapsed, Interval, Sleep, Timeout, TimerHandle, interval, set_interval, set_timeout, sleep,
+    sleep_until, timeout, timeout_at,
+};
 pub use yield_now::{YieldNow, yield_now};

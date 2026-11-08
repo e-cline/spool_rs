@@ -5,7 +5,7 @@
 //! and rejected instead of aliasing a new entry.
 
 /// A key into a [`Slab`]: slot index plus the generation it was issued for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Key {
     index: u32,
     generation: u32,
@@ -102,7 +102,6 @@ impl<T> Slab<T> {
         key
     }
 
-    #[cfg(test)]
     pub(crate) fn get(&self, key: Key) -> Option<&T> {
         match self.entries.get(key.index as usize)? {
             Entry::Occupied { generation, value } if *generation == key.generation => Some(value),
@@ -117,7 +116,6 @@ impl<T> Slab<T> {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn contains(&self, key: Key) -> bool {
         self.get(key).is_some()
     }

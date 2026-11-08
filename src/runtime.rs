@@ -4,15 +4,18 @@ use std::cell::RefCell;
 use std::fmt;
 use std::future::Future;
 use std::pin::{Pin, pin};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 
+use crate::clock::{Clock, Instant, SystemClock};
 use crate::context;
+use crate::park;
 use crate::queue::{Callback, Microtask, Queue};
 use crate::slab::Slab;
 use crate::task::{self, JoinHandle, MAIN_TASK, TaskId, TaskSlot};
+use crate::timer::{FireAction, TimerHandle, TimerQueue};
 use crate::waker::{Shared, TaskHeader};
 
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
@@ -22,25 +25,40 @@ const STALL_MESSAGE: &str = "spool: main future stalled: it is pending but nothi
 
 /// The runtime's thread-local state. Never shared across threads.
 pub(crate) struct Inner {
+    /// A weak reference to this `Inner`, for handing out `TimerHandle`s.
+    this: Weak<Inner>,
     ticks: Queue<Callback>,
     microtasks: Queue<Microtask>,
     tasks: RefCell<Slab<TaskSlot>>,
+    timers: RefCell<TimerQueue>,
+    clock: Rc<dyn Clock>,
     shared: Arc<Shared>,
 }
 
 impl Inner {
-    fn new() -> Self {
+    fn new(clock: Rc<dyn Clock>) -> Rc<Self> {
         let id = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
-        Inner {
+        Rc::new_cyclic(|this| Inner {
+            this: this.clone(),
             ticks: Queue::default(),
             microtasks: Queue::default(),
             tasks: RefCell::new(Slab::new()),
+            timers: RefCell::new(TimerQueue::default()),
+            clock,
             shared: Arc::new(Shared::new(id)),
-        }
+        })
     }
 
     pub(crate) fn id(&self) -> u64 {
         self.shared.runtime_id
+    }
+
+    pub(crate) fn now(&self) -> Instant {
+        self.clock.now()
+    }
+
+    pub(crate) fn timers(&self) -> &RefCell<TimerQueue> {
+        &self.timers
     }
 
     /// Queues a poll of `id`. Only called on the runtime's own thread.
@@ -162,20 +180,82 @@ impl Inner {
         any
     }
 
-    /// Drops every task, tick, and microtask, repeating until nothing is left
-    /// (a `Drop` impl may queue more work). Everything is dropped outside of
-    /// any `RefCell` borrow.
+    /// The timers phase (§3.3). Fires every timer that is due at the phase's
+    /// start time and was armed before the phase started, draining ticks and
+    /// microtasks after each one.
+    ///
+    /// Returns `(fired_any, stop)`, where `stop` means `poll_main` asked to
+    /// stop.
+    fn run_timers(&self, poll_main: &mut dyn FnMut() -> bool) -> (bool, bool) {
+        /// Restores set-aside timers when the phase ends, even on unwind.
+        struct EndPhase<'a>(&'a RefCell<TimerQueue>);
+        impl Drop for EndPhase<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut timers) = self.0.try_borrow_mut() {
+                    timers.end_phase();
+                }
+            }
+        }
+
+        let now = self.clock.now();
+        let cutoff = self.timers.borrow().next_seq();
+        let _end_phase = EndPhase(&self.timers);
+        let mut fired_any = false;
+        loop {
+            let next = self.timers.borrow_mut().pop_expired(now, cutoff);
+            let Some(key) = next else {
+                return (fired_any, false);
+            };
+            fired_any = true;
+            let (action, removed) = self.timers.borrow_mut().fire(key);
+            drop(removed);
+            match action {
+                FireAction::Wake(waker) => waker.wake(),
+                FireAction::Once(callback) => callback(),
+                FireAction::Interval(callback, period) => {
+                    let handle = TimerHandle::new(self.this.clone(), key);
+                    (callback.borrow_mut())(&handle);
+                    drop(callback);
+                    // Re-arm (Node-style, from this phase's time) unless the
+                    // callback cancelled it.
+                    self.timers
+                        .borrow_mut()
+                        .rearm(key, now.saturating_add(period));
+                }
+                FireAction::Nothing => {}
+            }
+            if self.drain(poll_main) {
+                return (true, true);
+            }
+        }
+    }
+
+    /// Waits until `deadline`: lets the clock jump there if it can (a
+    /// `MockClock`), else parks the thread (or until a remote wake).
+    fn wait_until(&self, deadline: Instant) {
+        let now = self.clock.now();
+        if deadline <= now || self.clock.advance_when_idle(deadline) {
+            return;
+        }
+        park::park(Some(deadline.saturating_duration_since(now)));
+    }
+
+    /// Drops every task, tick, microtask, and timer, repeating until nothing
+    /// is left (a `Drop` impl may queue more work). Everything is dropped
+    /// outside of any `RefCell` borrow.
     fn tear_down(&self) {
         loop {
             let ticks = self.ticks.take_all();
             let microtasks = self.microtasks.take_all();
             let slots = self.tasks.borrow_mut().drain();
-            if ticks.is_empty() && microtasks.is_empty() && slots.is_empty() {
+            let timers = self.timers.borrow_mut().take_all();
+            if ticks.is_empty() && microtasks.is_empty() && slots.is_empty() && timers.is_empty() {
                 break;
             }
             drop(ticks);
             drop(microtasks);
             drop(slots);
+            drop(timers);
         }
     }
 
@@ -212,16 +292,32 @@ impl Inner {
             if self.absorb_remote() {
                 continue;
             }
-            // The queues are empty.
-            if main.output.is_some() {
+
+            let (fired, stop) =
+                self.run_timers(&mut || main.poll_if_pending() && stop_when_main_done);
+            if stop {
                 return main.take_output();
+            }
+            if fired {
+                continue;
+            }
+
+            // Idle: the queues are empty and no timer is due.
+            let next_deadline = self.timers.borrow_mut().next_deadline();
+            if let Some(deadline) = next_deadline {
+                // Armed timers keep the loop alive.
+                self.wait_until(deadline);
+                continue;
+            }
+            if main.output.is_some() {
+                return main.take_output(); // `run`: the loop is empty.
             }
             // Main is pending. It can only make progress if someone still
             // holds one of its wakers (this frame holds the header once).
             // That someone may be another thread, so park until a remote
             // wake arrives.
             if Arc::strong_count(&main.header) > 1 {
-                std::thread::park();
+                park::park(None);
                 continue;
             }
             panic!("{STALL_MESSAGE}");
@@ -275,8 +371,8 @@ impl<F: Future> MainTask<'_, F> {
 /// when you want to spawn tasks before running, or to drive the same runtime
 /// several times.
 ///
-/// `Runtime` is `!Send` and `!Sync`. Dropping it drops every task, tick, and
-/// microtask that is still pending.
+/// `Runtime` is `!Send` and `!Sync`. Dropping it drops every task, tick,
+/// microtask, and timer that is still pending.
 ///
 /// ```
 /// let rt = spool::Runtime::new();
@@ -288,11 +384,19 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Creates a new runtime on the current thread.
+    /// Creates a new runtime on the current thread, with a [`SystemClock`].
     pub fn new() -> Self {
-        Runtime {
-            inner: Rc::new(Inner::new()),
-        }
+        Self::builder().build()
+    }
+
+    /// Returns a [`Builder`] for configuring a runtime.
+    pub fn builder() -> Builder {
+        Builder::default()
+    }
+
+    /// The current time on this runtime's clock.
+    pub fn now(&self) -> Instant {
+        self.inner.now()
     }
 
     /// Spawns a task onto this runtime. The task runs once the runtime is
@@ -310,9 +414,9 @@ impl Runtime {
     /// output.
     ///
     /// The loop has "nothing left to do" when the tick and microtask queues
-    /// are empty. (Later milestones add active timers to this.) As in Node, a
-    /// detached task that is pending on something else doesn't keep the loop
-    /// alive: it stays on the runtime, and is dropped with it.
+    /// are empty and no timer is armed. As in Node, a detached task that is
+    /// pending on something else (not a timer) doesn't keep the loop alive:
+    /// it stays on the runtime, and is dropped with it.
     ///
     /// Before `future` is first polled, any work already queued on the runtime
     /// (for example, tasks spawned with [`Runtime::spawn`]) runs first. The
@@ -367,6 +471,43 @@ impl Runtime {
     }
 }
 
+/// Configures and builds a [`Runtime`].
+///
+/// ```
+/// let clock = spool::MockClock::new();
+/// let rt = spool::Runtime::builder().clock(clock.clone()).build();
+/// assert_eq!(rt.now(), clock.now());
+/// ```
+#[derive(Default)]
+pub struct Builder {
+    clock: Option<Rc<dyn Clock>>,
+}
+
+impl Builder {
+    /// Uses `clock` as the runtime's time source. The default is a
+    /// [`SystemClock`]; tests usually want a [`MockClock`](crate::MockClock).
+    pub fn clock(mut self, clock: impl Clock + 'static) -> Self {
+        self.clock = Some(Rc::new(clock));
+        self
+    }
+
+    /// Builds the runtime.
+    pub fn build(self) -> Runtime {
+        let clock = self.clock.unwrap_or_else(|| Rc::new(SystemClock::new()));
+        Runtime {
+            inner: Inner::new(clock),
+        }
+    }
+}
+
+impl fmt::Debug for Builder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Builder")
+            .field("custom_clock", &self.clock.is_some())
+            .finish()
+    }
+}
+
 impl Default for Runtime {
     fn default() -> Self {
         Self::new()
@@ -388,6 +529,7 @@ impl fmt::Debug for Runtime {
         f.debug_struct("Runtime")
             .field("id", &self.inner.id())
             .field("tasks", &self.inner.tasks.borrow().len())
+            .field("now", &self.inner.now())
             .field("ticks_empty", &self.inner.ticks.is_empty())
             .field("microtasks_empty", &self.inner.microtasks.is_empty())
             .finish()
