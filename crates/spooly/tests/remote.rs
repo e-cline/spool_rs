@@ -272,6 +272,13 @@ fn many_threads_wake_main_repeatedly() {
                     w.wake();
                 }
             }
+            // The channel disconnects only once every sender is gone, so
+            // wake main again after dropping ours: otherwise main can drain
+            // the last message, see `Empty`, and wait forever.
+            drop(tx);
+            if let Some(w) = stash.lock().unwrap().take() {
+                w.wake();
+            }
         }));
     }
     drop(tx);
