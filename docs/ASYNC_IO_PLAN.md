@@ -1,6 +1,6 @@
 # Spooly — Async I/O Design & Plan
 
-> Status: **v2, reviewed.** M11–M13 are built; see §12. This document
+> Status: **v2, reviewed.** M11–M15 are built; see §12. This document
 > expands §9.1 and §9.2 of [`INITIAL_PLAN.md`](INITIAL_PLAN.md) into a
 > design and milestones. Decisions are tagged `IO#` so they don't collide
 > with the core plan's `D#` numbers. v2 settles draft v1's open questions
@@ -742,7 +742,8 @@ to, and the "revisit if" column says what would prompt that.
 ## 12. Milestones
 
 These continue the core plan's numbering. M10 (WASI driver) stays deferred
-and is only a prerequisite for M16.
+and is only a prerequisite for M16. The core plan's performance milestone,
+first numbered M11, is now M17.
 
 | # | Milestone | Status | Contents |
 |---|---|---|---|

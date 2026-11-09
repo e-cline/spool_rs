@@ -830,8 +830,8 @@ pass may switch to `unsafe` in the hot paths where it is clearly worth it:
 - A local-wake fast path that avoids atomics where it's sound.
 
 Each change must keep the full test suite and Miri passing, and must show a
-measured improvement in benchmarks before it merges. It runs after M10, so
-that the hot paths are the ones every target shares.
+measured improvement in benchmarks before it merges. It is M17 (§12) and
+runs after M10, so that the hot paths are the ones every target shares.
 
 ---
 
@@ -921,4 +921,5 @@ that the hot paths are the ones every target shares.
 | M8 | Non-blocking core | done | Split `drive()` into `step()` (D5) and a native driver; make main a resumable task; per-target default clock (D13); `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1` in CI. Settle the public-`step()` question (§10). No behavior change on native: the full suite must pass unchanged. |
 | M9 | Browser | done | Feature `browser`: `PerformanceClock`, the host-callback driver (D14), `browser::start`, an example page, and the suite (minus threads and panics) under `wasm-bindgen-test` in a headless browser in CI. |
 | M10 | WASI | deferred | Make the suite (minus threads) pass under wasmtime on `wasm32-wasip1` (and `-wasip2` if it is no extra work), adding a WASI driver only if the native one doesn't work there; add it to CI. |
-| M11 | Performance | | §9.6, measured against `BENCHMARKS.md`. |
+| M11–M16 | Async I/O | | Numbers taken by [`ASYNC_IO_PLAN.md`](ASYNC_IO_PLAN.md) §12: M11–M15 done, M16 (WASI 0.2 I/O) after M10. |
+| M17 | Performance | | §9.6, measured against `BENCHMARKS.md`. Renumbered from M11, whose number the async I/O plan took. |
