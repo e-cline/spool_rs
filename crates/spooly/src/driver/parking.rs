@@ -1,6 +1,8 @@
-//! The native driver behind `run` and `block_on`: steps the loop, and parks
-//! the thread (or waits on the I/O driver) while it waits for a timer, I/O,
-//! or a remote wake.
+//! The parking driver behind `run` and `block_on`, on every target: steps
+//! the loop, and blocks the thread (on the I/O driver's `wait`, or else
+//! with `platform::park`) while it waits for a timer, I/O, or a remote
+//! wake. Natively that parks the thread; on WASI it sleeps (M10); in the
+//! browser it can't block, so it busy-waits.
 
 use std::future::Future;
 use std::pin::pin;

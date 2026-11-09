@@ -1,6 +1,6 @@
 //! Scheduling order of tasks and `yield_now` (design decisions D3, D4).
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use wasm_bindgen_test::wasm_bindgen_test as test;
 
 mod common;

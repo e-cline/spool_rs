@@ -6,16 +6,17 @@
 > and it targets native and WASM equally. v5 replaces the panic model with
 > one that behaves the same on every target: Spooly doesn't catch panics
 > (§6). §11.2 and §11.3 list what v4 and v5 changed, and §12 has the
-> milestones (M8 onward is the WASM work; M8, the non-blocking core, and
-> M9, the browser driver, are done). Decisions are tagged `D#`; a
-> decision marked *(revised in v4)*, *(new in v4)* or *(revised in v5)*
-> says what is built so far.
+> milestones (M8 onward is the WASM work; M8, the non-blocking core, M9,
+> the browser driver, and M10, WASI 0.2, are done). Decisions are tagged
+> `D#`; a decision marked *(revised in v4)*, *(new in v4)* or *(revised in
+> v5)* says what is built so far. WASI means WASI 0.2 (`wasm32-wasip2`)
+> only; WASI 0.1 is not a target (§11.4).
 
 Spooly is a small, single-threaded Rust async executor whose scheduling model
 is inspired by the JavaScript event loop: woken tasks run as FIFO microtasks,
 and timers run one at a time as macrotasks. Futures and tasks **do not need
 `Send` or `Sync`**, so you can freely use `Rc`, `RefCell`, and `Cell` inside
-spawned tasks. It runs natively and in WASM (browser and WASI).
+spawned tasks. It runs natively and in WASM (browser and WASI 0.2).
 
 ---
 
@@ -27,7 +28,8 @@ spawned tasks. It runs natively and in WASM (browser and WASI).
   ordering**: the code of a macrotask → the microtask queue → timers, one
   at a time. Spooly's own spec (§3) and reference model (§8) define the order.
 - **Native and WASM**: the same core runs on desktop and server OSes, in the
-  browser (`wasm32-unknown-unknown`), and under WASI. The loop never blocks
+  browser (`wasm32-unknown-unknown`), and under WASI 0.2
+  (`wasm32-wasip2`). The loop never blocks
   on its own; a per-target driver waits for it (D5).
 - No `Send`/`Sync` bounds on futures, outputs, or callbacks.
 - APIs:
@@ -420,12 +422,20 @@ crates/spooly/
 │   │   └── timeout.rs  # Timeout, Elapsed
 │   ├── clock.rs        # Instant, Clock trait, SystemClock, MockClock
 │   ├── blocking.rs     # (M14) spawn_blocking and the per-runtime thread pool
+│   ├── blocking/
+│   │   └── unsupported.rs # (M10) its stand-in without threads (WASM)
+│   ├── platform/       # (M10) per-target primitives, one compiled (D16)
+│   │   ├── mod.rs      # the contract: default_clock, park, Unparker,
+│   │   │               # notify_remote_wake
+│   │   ├── native.rs   # threads: thread::park / unpark
+│   │   ├── wasi.rs     # wasm32-wasip2: thread::sleep; no unpark
+│   │   └── web.rs      # wasm32-unknown-unknown: no park; wakes queue a step
 │   ├── driver.rs       # MainTask, shared by the drivers of §7; the public
 │   │                   # IoDriver hook (M12, ASYNC_IO_PLAN.md §5)
 │   └── driver/
-│       ├── native.rs   # (M8) run / block_on: thread park, remote wakes
-│       ├── browser.rs  # (M9, feature "browser") host callbacks, JS timers
-│       └── wasi.rs     # (M10, if native.rs doesn't already work there)
+│       ├── parking.rs  # (M8; `native.rs` until M10) run / block_on, on
+│       │               # every target: waits on the I/O driver or parks
+│       └── browser.rs  # (M9, feature "browser") host callbacks, JS timers
 ├── tests/              # see §8
 └── examples/
 ```
@@ -631,12 +641,12 @@ Runtime::builder().clock(MockClock::new()).build()
   no "manual-only" mode. A frozen clock with nothing left to advance it would
   hang the loop.)* It works the same on every target.
 
-| | Native | Browser (`wasm32-unknown-unknown`) | WASI (`wasm32-wasip1` / `-wasip2`) |
+| | Native | Browser (`wasm32-unknown-unknown`) | WASI 0.2 (`wasm32-wasip2`) |
 |---|---|---|---|
-| Default clock | `SystemClock` (`std::time::Instant`) | `PerformanceClock` (`performance.now()`) | `SystemClock` (`std` supports it) |
-| Driver | thread park / unpark (`run`, `block_on`) | host callbacks (`browser::start`); next deadline via JS `setTimeout` | thread sleep (`poll_oneoff`), or the native driver if it already works |
+| Default clock | `SystemClock` (`std::time::Instant`) | `PerformanceClock` (`performance.now()`) | `SystemClock` (`wasi:clocks/monotonic-clock`) |
+| Driver | the parking driver (`run`, `block_on`): thread park / unpark | host callbacks (`browser::start`); next deadline via JS `setTimeout` | the parking driver, which sleeps (`thread::sleep`, a monotonic-clock pollable) instead of parking (D16) |
 | Entry point | `run`, `block_on` | `browser::start(main)`, returns at once | `run`, `block_on` |
-| Remote wakes | yes | only with atomics/threads | no threads (p1) |
+| Remote wakes | yes | only with atomics/threads | none: no threads. Waiting for one with no timer due panics (D16) |
 | Panics | unwind out of `run` (§6) | abort the program (the default) | abort the program (the default) |
 | Dependencies | none | `wasm-bindgen` + `js-sys`, behind feature `browser` | none expected |
 | Tests | full suite | `wasm-bindgen-test`, headless browser | full suite (minus threads) under wasmtime |
@@ -672,6 +682,35 @@ Runtime::builder().clock(MockClock::new()).build()
   native driver's timed park returns at once there, so it busy-waits.
 - On every target, `cargo check` must pass in CI from M8, so a regression in
   portability is caught before the target's own driver lands.
+- **D16. WASI driver and the platform layer** *(new in M10)*. The native
+  driver works on WASI unchanged except for how it waits: `std`'s
+  `thread::park` there is a no-op (it returns at once), so the loop spun
+  through every wait. It is now the **parking driver** of every target,
+  and waits through `platform::park` (when there's no I/O driver), where
+  `src/platform/` has one module per target, chosen with `cfg_select!`:
+  - `native` (anything with threads): `thread::park` / `Thread::unpark`.
+  - `wasi`: `thread::sleep(timeout)`, which on `wasip2` blocks on a
+    `monotonic-clock` pollable. Sleeping the whole timeout is safe, since
+    with no threads nothing can wake a task meanwhile (I/O, which can, is
+    the I/O driver's job: M16). A wait with **no** timeout could never end
+    (a `KeepAlive`, or a waker held outside, that only this thread could
+    release), so it **panics** with a diagnostic rather than hanging, as a
+    stalled main does (D8).
+  - `web`: `park` returns at once (as before: `run` / `block_on` in the
+    browser busy-wait), and a remote wake queues a browser-driver step.
+
+  Each module also supplies the target's default clock (D13). These are
+  plain functions and types with one fixed set of names (re-exported by
+  `platform/mod.rs`, so a module missing one fails to build), not a trait:
+  only one is compiled, and nothing chooses between them at run time. The
+  core's other `cfg`s were for the blocking pool, which needs threads; on
+  WASM a stand-in with the same internal names (`blocking/unsupported.rs`)
+  replaces it, so `runtime.rs` keeps `cfg` only on the public `Builder`
+  methods that don't exist there. *(Considered and not done: a `Platform`
+  trait, or one driver per target. The drivers that differ, parking and
+  browser, differ in kind, a blocking loop against host callbacks, and
+  already share `step()` and `MainTask`; a trait over them would add
+  indirection without removing code. See the M10 notes in §12.)*
 
 ---
 
@@ -709,7 +748,7 @@ that coverage into the model, and removed the Node fuzzer.)*
 | **Stress tests** | `tests/stress.rs` (`#[ignore]` by default) | 1M spawned tasks, 100k timers with random cancellation, deep microtask and join chains; checks for no stack growth and roughly linear time |
 | **Doc tests** | rustdoc | Every public item has a runnable example |
 | **Node comparison** (optional) | `tests/node_parity.rs` | A handful of scenarios also run as JS in Node, as a sanity check that Spooly's model is still recognizably JS-like. Opt-in with `SPOOLY_COMPARE_NODE=1`; otherwise (and in CI) only the Spooly half runs. A scenario where Spooly deliberately differs (intervals, D7) is not compared. |
-| **WASM** (M8–M10) | CI | `cargo check` on WASM targets; the suite under `wasm-bindgen-test` (browser) and wasmtime (WASI) |
+| **WASM** (M8–M10) | CI | `cargo check` on WASM targets; the suite under `wasm-bindgen-test` (browser) and wasmtime (`wasm32-wasip2`), with tests that need threads or catch panics marked `ignore`; `model`, `stress`, `node_parity`, `panics`, `blocking` and `io_driver` are native-only, and so are the doctests |
 | **Browser driver** (M9) | `tests/browser.rs` | `browser::start` in a real browser: steps from JS callbacks, real timers via `setTimeout`, wakes from outside a step, `MockClock` jumps, several runtimes, and the runtime outliving main. The shared files run in the browser too, with tests that need threads or catch panics marked `ignore` there; `model`, `stress`, `node_parity` and `panics` are native-only. |
 
 ### 8.2 Core ordering scenarios
@@ -757,7 +796,11 @@ that coverage into the model, and removed the Node fuzzer.)*
 - `cargo clippy -D warnings`, `cargo fmt --check`, and `cargo doc -D warnings`.
 - Coverage with `cargo-llvm-cov`: CI requires ≥ 90% of lines.
 - Miri runs on the full suite. It becomes essential once `unsafe` lands (§9.6).
-- From M8: `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1`.
+- From M8: `cargo check` for `wasm32-unknown-unknown` and (from M10)
+  `wasm32-wasip2`, instead of `wasm32-wasip1`.
+- From M10: clippy and the core's suite (`--lib --tests`) on `wasm32-wasip2`
+  under wasmtime, which `.cargo/config.toml` sets as that target's runner,
+  so `cargo test --target wasm32-wasip2` works locally too.
 - From M9: the suite with `--features browser` under `wasm-pack test
   --headless`, in Chrome and Firefox (with the runner's preinstalled
   drivers, which match its browsers), and clippy and docs for that target,
@@ -831,7 +874,8 @@ pass may switch to `unsafe` in the hot paths where it is clearly worth it:
 
 Each change must keep the full test suite and Miri passing, and must show a
 measured improvement in benchmarks before it merges. It is M17 (§12) and
-runs after M10, so that the hot paths are the ones every target shares.
+runs after M10 (now done), so that the hot paths are the ones every target
+shares.
 
 ---
 
@@ -852,9 +896,10 @@ runs after M10, so that the hot paths are the ones every target shares.
   with `#[wasm_bindgen] extern` blocks, so `js-sys` isn't needed. It is an
   optional, wasm-only dependency behind the `browser` feature, and needs no
   `unsafe` in Spooly's code.
-- **WASI driver (decide in M10).** Whether the native driver works unchanged
-  on `wasm32-wasip1`, or WASI needs its own sleep-based driver because
-  `std::thread::park` isn't supported there.
+- **WASI driver (decided in M10: the native driver, waiting differently).**
+  `std::thread::park` is a no-op on WASI, so the native driver, renamed the
+  parking driver, waits through a per-target `platform::park`, which
+  sleeps on WASI (D16). Only WASI 0.2 is supported (§11.4).
 
 ---
 
@@ -903,6 +948,15 @@ runs after M10, so that the hot paths are the ones every target shares.
 | Targets | Different panic behaviour natively and on WASM | The same model everywhere (§6) |
 | Unwind vs abort | Required unwinding for the model to work | The application's `panic` setting decides; Spooly never forces an abort (§6) |
 
+### 11.4 Changed in M10
+
+| Topic | Before | M10 |
+|---|---|---|
+| WASI targets | `wasm32-wasip1`, and `-wasip2` if no extra work | **`wasm32-wasip2` only** (WASI 0.2). WASI 0.1 isn't built, tested, or supported: its sockets can't connect, so `spooly-io` (M16) couldn't use it anyway, and 0.2 is what the WASI ecosystem targets. The `wasi` platform module is chosen by `target_os = "wasi"`, so 0.1 may happen to build, but nothing checks it |
+| Native driver | Thread park, native only | The parking driver of every target, waiting through `platform::park` (D16) |
+| Per-target code | `cfg`s across `runtime.rs`, `waker.rs` and `clock.rs` | One `platform` module per target, and a no-threads stand-in for the blocking pool (D16) |
+| Waiting forever on WASI | (not specified; it spun) | Panics with a diagnostic (D16) |
+
 ---
 
 ## 12. Milestones
@@ -920,6 +974,6 @@ runs after M10, so that the hot paths are the ones every target shares.
 | M7.5 | Simpler panics (v5) | done | Remove `catch_unwind`, the panicked join state, unobserved-panic re-raising, and poisoning (D11). `JoinError` becomes an opaque "aborted" struct. Rewrite the panic tests, the model's panic handling, the docs, and the `panics` example for the new model. |
 | M8 | Non-blocking core | done | Split `drive()` into `step()` (D5) and a native driver; make main a resumable task; per-target default clock (D13); `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1` in CI. Settle the public-`step()` question (§10). No behavior change on native: the full suite must pass unchanged. |
 | M9 | Browser | done | Feature `browser`: `PerformanceClock`, the host-callback driver (D14), `browser::start`, an example page, and the suite (minus threads and panics) under `wasm-bindgen-test` in a headless browser in CI. |
-| M10 | WASI | deferred | Make the suite (minus threads) pass under wasmtime on `wasm32-wasip1` (and `-wasip2` if it is no extra work), adding a WASI driver only if the native one doesn't work there; add it to CI. |
-| M11–M16 | Async I/O | | Numbers taken by [`ASYNC_IO_PLAN.md`](ASYNC_IO_PLAN.md) §12: M11–M15 done, M16 (WASI 0.2 I/O) after M10. |
+| M10 | WASI 0.2 | done | The suite (minus threads, panics, and the native-only files of §8.1) passes under wasmtime on `wasm32-wasip2`, in CI; `wasm32-wasip1` is dropped from CI and the plan (§11.4). The native driver works there except for waiting (`thread::park` is a no-op), so it became the parking driver of every target, waiting through the new `platform` layer, which also holds the default clocks; the blocking pool gets a no-threads stand-in (D16). Waiting for a wake that can't come panics on WASI. Not done: the reference model on WASI (it generates panics, which abort there), and `io_driver.rs` there (its fake reactor needs a thread; M16's WASI backend will test that path for real). |
+| M11–M16 | Async I/O | | Numbers taken by [`ASYNC_IO_PLAN.md`](ASYNC_IO_PLAN.md) §12: M11–M15 done, M16 (WASI 0.2 I/O) next. |
 | M17 | Performance | | §9.6, measured against `BENCHMARKS.md`. Renumbered from M11, whose number the async I/O plan took. |

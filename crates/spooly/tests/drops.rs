@@ -1,6 +1,6 @@
 //! Everything is dropped exactly once, and nothing leaks.
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use wasm_bindgen_test::wasm_bindgen_test as test;
 
 mod common;

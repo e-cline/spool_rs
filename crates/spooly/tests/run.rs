@@ -1,6 +1,6 @@
 //! `run`: Node-like "until the loop is empty" semantics (plan §3.5).
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use wasm_bindgen_test::wasm_bindgen_test as test;
 
 mod common;

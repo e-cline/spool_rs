@@ -10,9 +10,10 @@
 //!   time, and the microtask queue drains completely after each.
 //! - **Deterministic tests.** A [`MockClock`] makes timers fire instantly, in
 //!   a fixed order.
-//! - **Native and the browser.** [`run`] and [`block_on`] drive the loop on
-//!   native targets; in the browser, `browser::start` drives it from JS
-//!   callbacks (see [In the browser](#in-the-browser)).
+//! - **Native, WASI, and the browser.** [`run`] and [`block_on`] drive the
+//!   loop on native targets and on WASI 0.2 (see [On WASI](#on-wasi)); in
+//!   the browser, `browser::start` drives it from JS callbacks (see
+//!   [In the browser](#in-the-browser)).
 //! - **Minimal dependencies** (none at runtime on native targets), and no
 //!   `unsafe` code.
 //!
@@ -178,6 +179,16 @@
 //! through the (unstable) [`driver`] module: the loop polls it after the
 //! timers in each step, and waits on it when there is nothing else to do.
 //!
+//! ## On WASI
+//!
+//! On `wasm32-wasip2` (WASI 0.2; WASI 0.1 isn't supported), Spooly works as
+//! on native, with [`run`] and [`block_on`] and no extra feature. The
+//! default clock is [`SystemClock`] (WASI's monotonic clock), and the loop
+//! sleeps until the next timer. WASI has no threads, so there's no
+//! `spawn_blocking`, and nothing outside the runtime can wake it: if the
+//! loop would wait for a wake with no timer due (a [`KeepAlive`] is held,
+//! say), it panics instead of hanging. Panics abort, as on all WASM.
+//!
 //! ## In the browser
 //!
 //! On `wasm32-unknown-unknown`, enable the `browser` feature (which adds the
@@ -210,14 +221,17 @@
 
 #![warn(unreachable_pub)]
 
-#[cfg(not(target_family = "wasm"))]
+// `spawn_blocking` needs threads. Elsewhere a stand-in with the same
+// internal names (and no public API) keeps the runtime free of `cfg`s.
+#[cfg_attr(target_family = "wasm", path = "blocking/unsupported.rs")]
 mod blocking;
-#[cfg(all(feature = "browser", target_arch = "wasm32"))]
+#[cfg(all(feature = "browser", target_arch = "wasm32", target_os = "unknown"))]
 pub mod browser;
 mod clock;
 mod context;
 pub mod driver;
 mod keep_alive;
+mod platform;
 mod queue;
 mod runtime;
 mod slab;

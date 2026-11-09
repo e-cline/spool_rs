@@ -1,7 +1,7 @@
 //! User code calling back into the runtime from polls and `Drop` impls.
 //! None of these may hit a `RefCell` `BorrowMutError`.
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use wasm_bindgen_test::wasm_bindgen_test as test;
 
 mod common;

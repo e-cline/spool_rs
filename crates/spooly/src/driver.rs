@@ -19,20 +19,21 @@
 //! is drained again. The I/O phase runs in every step, even one in which
 //! timers fired, so timers can't starve I/O.
 //!
-//! When there is nothing to do until the next timer or some I/O, the native
+//! When there is nothing to do until the next timer or some I/O, the parking
 //! driver (behind [`run`](crate::run) and [`block_on`](crate::block_on))
 //! calls [`IoDriver::wait`] instead of parking its thread. The browser
 //! driver never blocks, so it never calls `wait`.
 
-// The drivers below are Spooly's own (internal): the per-target code that
-// calls the event loop's `step` and waits between steps (D5, §7). The step
-// never blocks; a driver decides how to wait. Natively, that is parking the
-// thread, or the I/O driver's `wait` (`native`); in the browser, steps run
-// from host callbacks (`browser`).
+// The drivers below are Spooly's own (internal): the code that calls the
+// event loop's `step` and waits between steps (D5, §7). The step never
+// blocks; a driver decides how to wait. `parking` (behind `run` and
+// `block_on`, on every target) blocks its thread: on the I/O driver's
+// `wait`, or else with `platform::park`. `browser` (behind
+// `browser::start`) never blocks: steps run from host callbacks.
 
-#[cfg(all(feature = "browser", target_arch = "wasm32"))]
+#[cfg(all(feature = "browser", target_arch = "wasm32", target_os = "unknown"))]
 pub(crate) mod browser;
-pub(crate) mod native;
+pub(crate) mod parking;
 
 use std::any::Any;
 use std::future::Future;
@@ -113,7 +114,7 @@ pub trait IoDriver: Any {
     /// jump ([`MockClock`](crate::MockClock)), the loop calls it first, and
     /// only lets the clock jump to the next timer if it returns `false`.
     ///
-    /// Only drivers that may block call this: the native one does, the
+    /// Only drivers that may block call this: the parking one does, the
     /// browser one never does.
     fn wait(&self, timeout: Option<Duration>) -> bool;
 
@@ -147,7 +148,7 @@ pub fn current_io_driver<D: IoDriver>() -> Option<Rc<D>> {
 }
 
 /// A driver's main future, resumable across steps. `P` is how the future is
-/// held (as a `Pin<P>`): `&mut F` on the native driver's stack (so
+/// held (as a `Pin<P>`): `&mut F` on the parking driver's stack (so
 /// `block_on` accepts futures that aren't `'static`), or an owned
 /// `Box<dyn Future>` in the browser driver.
 pub(crate) struct MainTask<P: DerefMut<Target: Future>> {

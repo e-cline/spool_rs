@@ -11,6 +11,7 @@
 //! [`KeepAlive`] per job (so `run` waits for it), and an in-flight count
 //! (so a `MockClock` doesn't jump while a job runs).
 
+use std::cell::OnceCell;
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
@@ -26,9 +27,65 @@ use crate::context;
 use crate::keep_alive::KeepAlive;
 
 /// The default for [`Builder::max_blocking_threads`](crate::Builder::max_blocking_threads).
-pub(crate) const DEFAULT_MAX_THREADS: usize = 64;
+const DEFAULT_MAX_THREADS: usize = 64;
 /// The default for [`Builder::blocking_idle_timeout`](crate::Builder::blocking_idle_timeout).
-pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The pool's settings (`Builder::max_blocking_threads`, ...).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Config {
+    pub(crate) max_threads: usize,
+    pub(crate) idle_timeout: Duration,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            max_threads: DEFAULT_MAX_THREADS,
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
+        }
+    }
+}
+
+impl Config {
+    /// Adds the settings to the `Builder`'s `Debug` output.
+    pub(crate) fn debug_fields(&self, f: &mut fmt::DebugStruct<'_, '_>) {
+        f.field("max_blocking_threads", &self.max_threads)
+            .field("blocking_idle_timeout", &self.idle_timeout);
+    }
+}
+
+/// A runtime's pool, created on first use.
+pub(crate) struct LazyPool {
+    config: Config,
+    pool: OnceCell<Pool>,
+}
+
+impl LazyPool {
+    pub(crate) fn new(config: Config) -> Self {
+        LazyPool {
+            config,
+            pool: OnceCell::new(),
+        }
+    }
+
+    fn get(&self) -> &Pool {
+        self.pool
+            .get_or_init(|| Pool::new(self.config.max_threads, self.config.idle_timeout))
+    }
+
+    /// Whether any job is queued or running.
+    pub(crate) fn has_in_flight(&self) -> bool {
+        self.pool.get().is_some_and(Pool::has_in_flight)
+    }
+
+    /// Shuts the pool down, if it was ever created (see [`Pool::shut_down`]).
+    pub(crate) fn shut_down(&self) {
+        if let Some(pool) = self.pool.get() {
+            pool.shut_down();
+        }
+    }
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // Jobs run outside every lock, and nothing in a critical section
@@ -87,7 +144,7 @@ where
     T: Send + 'static,
 {
     let inner = context::current("spawn_blocking");
-    let pool = inner.blocking_pool();
+    let pool = inner.blocking.get();
     pool.in_flight.fetch_add(1, Ordering::Relaxed);
     let slot = Arc::new(Slot {
         state: Mutex::new(SlotState {
@@ -288,7 +345,7 @@ impl<T> fmt::Debug for BlockingHandle<T> {
 }
 
 /// A runtime's blocking thread pool.
-pub(crate) struct Pool {
+struct Pool {
     shared: Arc<PoolShared>,
     /// Jobs queued or running (not cancelled).
     in_flight: Arc<AtomicUsize>,
@@ -312,7 +369,7 @@ struct PoolState {
 }
 
 impl Pool {
-    pub(crate) fn new(max_threads: usize, idle_timeout: Duration) -> Pool {
+    fn new(max_threads: usize, idle_timeout: Duration) -> Pool {
         Pool {
             shared: Arc::new(PoolShared {
                 state: Mutex::new(PoolState {
@@ -330,7 +387,7 @@ impl Pool {
     }
 
     /// Whether any job is queued or running.
-    pub(crate) fn has_in_flight(&self) -> bool {
+    fn has_in_flight(&self) -> bool {
         self.in_flight.load(Ordering::Acquire) > 0
     }
 
@@ -372,7 +429,7 @@ impl Pool {
 
     /// Drops the queued jobs, and lets the idle workers exit. Running jobs
     /// finish; their workers then exit.
-    pub(crate) fn shut_down(&self) {
+    fn shut_down(&self) {
         let queued = {
             let mut state = lock(&self.shared.state);
             state.shutdown = true;

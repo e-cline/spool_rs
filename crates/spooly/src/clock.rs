@@ -222,32 +222,6 @@ impl Clock for SystemClock {
     }
 }
 
-/// The target's default clock (D13), used when the builder has none.
-pub(crate) fn default_clock() -> Rc<dyn Clock> {
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        Rc::new(SystemClock::new())
-    }
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "browser"))]
-    {
-        Rc::new(crate::browser::PerformanceClock::new())
-    }
-    // Without the `browser` feature there's no way to read the time here
-    // (`std::time::Instant::now()` panics), so fail early, with a clearer
-    // message.
-    #[cfg(all(
-        target_arch = "wasm32",
-        target_os = "unknown",
-        not(feature = "browser")
-    ))]
-    {
-        panic!(
-            "spooly: wasm32-unknown-unknown has no default clock without the `browser` \
-             feature; enable it, or pass a clock with `Runtime::builder().clock(...)`"
-        )
-    }
-}
-
 /// A virtual clock for deterministic tests.
 ///
 /// Time stands still until something advances it:

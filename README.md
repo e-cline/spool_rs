@@ -2,7 +2,7 @@
 
 **Spooly** is a lightweight, single-threaded Rust async executor, with a
 scheduling model inspired by the JavaScript event loop. It runs on native
-platforms and in the browser; WASI support is in progress.
+platforms, under WASI 0.2 (`wasm32-wasip2`), and in the browser.
 
 WARNING: This is an experiment. Nothing here is not intended for production use.
 
@@ -43,17 +43,16 @@ semantics.
 > reference model as the test oracle), and M7.5 (design v5: Spooly no longer
 > catches panics, so they behave the same natively and on WASM), and M8 (a
 > non-blocking core: the loop is a `step()` that a per-target driver calls,
-> and the crate builds for `wasm32-unknown-unknown` and `wasm32-wasip1`),
-> and M9 (the browser driver). Next: M10, WASI. See
-> [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md) §12.
+> and the crate builds for the WASM targets), M9 (the browser driver), and
+> M10 (WASI 0.2: the suite runs under wasmtime). Next: M17, performance.
+> See [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md) §12.
 >
 > Async I/O is in progress ([`docs/ASYNC_IO_PLAN.md`](docs/ASYNC_IO_PLAN.md)):
 > M11 (a Cargo workspace), M12 (an I/O driver hook in the core), M13
 > ([`crates/spooly-io`](crates/spooly-io): TCP, UDP and Unix sockets), and
 > M14 (`spooly::spawn_blocking`, a thread pool in the core; `spooly_io::fs`
 > and DNS on it), and M15 (in-memory test streams, `Async<T>` for any
-> file descriptor) are done. Next: M16, WASI 0.2 I/O, after the core's
-> WASI driver (M10).
+> file descriptor) are done. Next: M16, WASI 0.2 I/O.
 
 The crate docs (`cargo doc --open`) are the guide: the closest JS
 counterparts, the event loop, cancellation, panics, threads, and testing

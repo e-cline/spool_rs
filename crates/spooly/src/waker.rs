@@ -16,16 +16,15 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Wake;
-use std::thread::Thread;
 
 use crate::context;
+use crate::platform::{self, Unparker};
 use crate::task::TaskId;
 
-/// How to interrupt the native driver's wait, from any thread.
+/// How to interrupt the parking driver's wait, from any thread.
 pub(crate) enum Unpark {
-    /// Unpark the thread that owns the runtime (the only thread that runs
-    /// it), which waits with `thread::park`.
-    Thread(Thread),
+    /// The platform's unparker: the driver waits with `platform::park`.
+    Platform(Unparker),
     /// The I/O driver's unparker: the driver waits on its reactor instead.
     Driver(Arc<dyn Fn() + Send + Sync>),
 }
@@ -33,7 +32,7 @@ pub(crate) enum Unpark {
 impl Unpark {
     fn unpark(&self) {
         match self {
-            Unpark::Thread(thread) => thread.unpark(),
+            Unpark::Platform(unparker) => unparker.unpark(),
             Unpark::Driver(unpark) => unpark(),
         }
     }
@@ -104,9 +103,8 @@ impl Shared {
             .push(id);
         self.has_remote.store(true, Ordering::Release);
         self.unpark.unpark();
-        // In the browser nothing is parked: queue a step instead.
-        #[cfg(all(feature = "browser", target_arch = "wasm32"))]
-        crate::driver::browser::wake(self.runtime_id);
+        // In the browser nothing is parked: this queues a step instead.
+        platform::notify_remote_wake(self.runtime_id);
     }
 
     /// Takes every remotely woken id, in wake order.
