@@ -1,0 +1,25 @@
+[package]
+name = "spooly-io"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Async network I/O for the Spooly executor. No Send/Sync required."
+license.workspace = true
+repository.workspace = true
+keywords = ["async", "io", "net", "single-threaded", "event-loop"]
+categories = ["asynchronous", "network-programming"]
+publish = false
+
+[dependencies]
+futures-io.workspace = true
+spooly.workspace = true
+
+# The reactor (IO1). Other targets get no backend yet (IO8).
+[target.'cfg(any(unix, windows))'.dependencies]
+mio = { workspace = true, features = ["os-poll", "net"] }
+
+[dev-dependencies]
+futures.workspace = true
+
+[lints]
+workspace = true

@@ -117,7 +117,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
-      - run: cargo miri test --workspace
+      # The core only: spooly-io's tests use real sockets, which Miri
+      # can't run.
+      - run: cargo miri test -p spooly
         env:
           # Threads + `thread::sleep` in tests/remote.rs need real time.
           MIRIFLAGS: -Zmiri-disable-isolation

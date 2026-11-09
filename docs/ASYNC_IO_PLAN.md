@@ -1,6 +1,6 @@
 # Spooly — Async I/O Design & Plan
 
-> Status: **v2, reviewed.** M11 and M12 are built; see §12. This document
+> Status: **v2, reviewed.** M11–M13 are built; see §12. This document
 > expands §9.1 and §9.2 of [`INITIAL_PLAN.md`](INITIAL_PLAN.md) into a
 > design and milestones. Decisions are tagged `IO#` so they don't collide
 > with the core plan's `D#` numbers. v2 settles draft v1's open questions
@@ -386,7 +386,7 @@ message ("this runtime has no I/O driver; use `spooly_io::run` or
 
 ```rust
 TcpListener::bind(addr).await? ; listener.accept().await? -> (TcpStream, SocketAddr)
-TcpStream::connect(addr).await? ; stream.split() -> (ReadHalf<'_>, WriteHalf<'_>)
+TcpStream::connect(addr).await? ; stream.halves() -> (ReadHalf<'_>, WriteHalf<'_>)
 UdpSocket::bind(addr).await? ; send_to / recv_from / connect / send / recv
 #[cfg(unix)] UnixListener, UnixStream, UnixDatagram
 lookup_host("example.com:80").await?
@@ -406,6 +406,34 @@ lookup_host("example.com:80").await?
   no data for reads and `accept` (nothing was consumed). A partly done
   `write_all` stops at an unknown point, as everywhere in Rust async.
   Dropping a socket deregisters it and closes it.
+
+*As built (M13):*
+
+- `TcpListener::bind`, `TcpStream::connect`, `UdpSocket::bind`,
+  `UdpSocket::connect` and `send_to` are `async` and take `impl
+  ToSocketAddrs`. Until M14 they resolve with `std`, which blocks the
+  thread for a host name (not for an IP address); M14 moves resolution to
+  the pool without changing the signatures.
+- `UnixListener::bind`, `UnixDatagram::bind` and `connect` are plain
+  functions (nothing to resolve); `UnixStream::connect` is `async`.
+- `poll_accept`, `poll_send_to` and `poll_recv_from` are public, for
+  hand-written futures and streams. `into_std` returns a socket still in
+  non-blocking mode.
+- The halves (`ReadHalf`, `WriteHalf`, `OwnedReadHalf`, `OwnedWriteHalf`)
+  are generic over the stream, shared by TCP and Unix streams. The
+  borrowing split is `halves(&self)`, not `split`: method resolution
+  prefers `futures::AsyncReadExt::split(self)` (by value) over an inherent
+  `split(&self)`, so with that trait in scope `stream.split()` would
+  silently call it instead.
+  `OwnedReadHalf::reunite` puts a stream back together.
+- A wait cancelled while pending (a read inside an expired `timeout`)
+  leaves its waker behind: it keeps counting toward liveness (IO3) until
+  the socket is next ready, completes an operation, or is dropped. Clearing
+  it on cancellation would need every I/O future to be a named type with a
+  `Drop`, which `futures-io`'s poll-based traits can't offer.
+- The reactor doesn't use `mio`'s `log` feature, so `spooly-io` adds only
+  `mio` (with `libc` or `windows-sys`) and `futures-io`.
+- Miri can't run real sockets, so CI runs Miri on the core only.
 
 ### 7.3 Arbitrary file descriptors
 
@@ -619,7 +647,7 @@ and is only a prerequisite for M16.
 |---|---|---|---|
 | M11 | Workspace | done | Move the crate to `crates/spooly`; root `[workspace]` with shared package fields, lints and dependencies; CI with `--workspace`. No code change; every test passes unchanged. |
 | M12 | Core hook | done | `spooly::driver::IoDriver`, `Builder::io_driver`, `current_io_driver`; the unparker in `Shared`; the I/O phase and `is_active` in `step()` (IO2, IO3); native driver waits through the driver and handles `MockClock` (IO4). Tested with a fake in-crate driver (scripted readiness, a counting unparker): phase order, timers-plus-I/O fairness, liveness, remote wakes interrupting `wait`. No behavior change without a driver; model and browser suites unchanged. |
-| M13 | `spooly-io` net | | The crate, `mio` reactor (IO1, §5.3), `Driver`, `run`/`block_on`, TCP/UDP/Unix, `futures-io` traits, `split`, `readable`/`writable`, `unref`. Loopback tests on all three OSes; liveness and stall tests; drop and cancellation tests; an echo-server example. |
+| M13 | `spooly-io` net | done | The crate, `mio` reactor (IO1, §5.3), `Driver`, `run`/`block_on`, TCP/UDP/Unix, `futures-io` traits, `halves`/`into_split`, `readable`/`writable`, `unref`. Loopback tests on all three OSes; liveness and stall tests; drop and cancellation tests; an echo-server example. |
 | M14 | Blocking + fs | | The pool, `spawn_blocking` (IO7), `lookup_host` and string-address `connect`, `spooly_io::fs` (free functions, then `File`). Tests in temp dirs, pool shutdown and idle exit, panic propagation. |
 | M15 | Extras | | `test::{duplex, pipe}`; `Async<T>`; `socket2` feature; I/O operations in the reference model through `duplex` (optional). |
 | M16 | WASI 0.2 | | After M10: the pollable backend (§8.2), `wasi:sockets`, inline `fs`; the `spooly-io` suite (minus threads) under wasmtime in CI. |
