@@ -114,8 +114,10 @@ impl UnixStream {
     /// Connects to the socket at `path`.
     pub async fn connect(path: impl AsRef<Path>) -> io::Result<UnixStream> {
         let stream = Self::new(mio::net::UnixStream::connect(path)?)?;
-        // Connected (or failed) once writable; a spurious writable event
-        // leaves the socket without a peer.
+        // Connected (or failed) once the OS reports it writable (a new
+        // socket starts out marked ready); a spurious writable event leaves
+        // the socket without a peer.
+        stream.io.clear_ready(Direction::Write);
         loop {
             stream.writable().await?;
             if let Some(e) = stream.io.get_ref().take_error()? {

@@ -205,6 +205,9 @@ impl Direction {
 
 const READABLE: u8 = 0b01;
 const WRITABLE: u8 = 0b10;
+/// The OS reported an error on the socket (on Windows, a failed connect).
+/// Sticky: nothing clears it.
+const ERROR: u8 = 0b100;
 
 /// The reactor's state for one socket.
 struct ScheduledIo {
@@ -247,6 +250,9 @@ impl ScheduledIo {
         }
         if event.is_writable() || event.is_write_closed() || event.is_error() {
             ready |= WRITABLE;
+        }
+        if event.is_error() {
+            ready |= ERROR;
         }
         self.readiness.set(self.readiness.get() | ready);
         for dir in [Direction::Read, Direction::Write] {
@@ -382,6 +388,11 @@ impl<S: Source> PollEvented<S> {
     /// caller learned that some other way than `WouldBlock`).
     pub(crate) fn clear_ready(&self, dir: Direction) {
         self.registration.io.clear_ready(dir);
+    }
+
+    /// Whether the OS has reported an error on the socket.
+    pub(crate) fn saw_error(&self) -> bool {
+        self.registration.io.readiness.get() & ERROR != 0
     }
 
     pub(crate) fn unref(&self) {

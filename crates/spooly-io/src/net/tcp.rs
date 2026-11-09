@@ -138,13 +138,24 @@ impl TcpStream {
 
     async fn connect_addr(addr: SocketAddr) -> io::Result<TcpStream> {
         let stream = Self::new(mio::net::TcpStream::connect(addr)?)?;
-        // The connection is established, or has failed, once the socket is
-        // writable. A writable event can also be spurious, which a missing
-        // peer address reveals.
+        // The connection is established, or has failed, once the OS reports
+        // the socket writable. A new socket starts out marked ready, so wait
+        // for a real event: until then, Windows already reports the peer
+        // address, and the stream would look connected.
+        stream.io.clear_ready(Direction::Write);
+        // A writable event can also be spurious, which a missing peer
+        // address reveals.
         loop {
             stream.writable().await?;
             if let Some(e) = stream.io.get_ref().take_error()? {
                 return Err(e);
+            }
+            if stream.io.saw_error() {
+                // The OS reported the failure, but not why.
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "the connection attempt failed",
+                ));
             }
             match stream.io.get_ref().peer_addr() {
                 Ok(_) => return Ok(stream),
