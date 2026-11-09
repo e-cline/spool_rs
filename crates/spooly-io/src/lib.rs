@@ -7,7 +7,11 @@
 //!
 //! - [`net`]: TCP, UDP, and Unix-domain sockets. Byte streams implement the
 //!   `futures-io` traits, so `futures::io::AsyncReadExt` and friends (and
-//!   crates built on those traits) work with them.
+//!   crates built on those traits) work with them. Host names are resolved
+//!   on Spooly's blocking pool ([`net::lookup_host`]).
+//! - [`fs`]: files and directories, run on Spooly's blocking pool
+//!   ([`spooly::spawn_blocking`]), since the OS has no readiness API for
+//!   files.
 //! - [`Driver`]: the reactor behind them, on the OS's readiness API
 //!   (epoll, kqueue, or Windows' AFD) through `mio`.
 //!
@@ -64,6 +68,8 @@
 
 #![warn(unreachable_pub)]
 
+#[cfg(any(unix, windows))]
+pub mod fs;
 #[cfg(any(unix, windows))]
 pub mod net;
 #[cfg(any(unix, windows))]

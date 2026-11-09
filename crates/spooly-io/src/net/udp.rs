@@ -3,12 +3,12 @@
 use std::fmt;
 use std::future::poll_fn;
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::task::{Context, Poll};
 
 use mio::Interest;
 
-use super::{each_addr, resolve};
+use super::{ToSocketAddrs, each_addr, resolve};
 use crate::reactor::{Direction, PollEvented};
 
 /// A UDP socket.
@@ -34,7 +34,7 @@ pub struct UdpSocket {
 impl UdpSocket {
     /// Binds a socket to `addr`, trying each address it resolves to.
     pub async fn bind(addr: impl ToSocketAddrs) -> io::Result<UdpSocket> {
-        each_addr(addr, |addr| Self::new(mio::net::UdpSocket::bind(addr)?))
+        each_addr(addr, |addr| Self::new(mio::net::UdpSocket::bind(addr)?)).await
     }
 
     fn new(socket: mio::net::UdpSocket) -> io::Result<UdpSocket> {
@@ -58,13 +58,13 @@ impl UdpSocket {
     /// Connects the socket to `addr`: [`send`](Self::send) goes there, and
     /// [`recv`](Self::recv) only receives from there.
     pub async fn connect(&self, addr: impl ToSocketAddrs) -> io::Result<()> {
-        each_addr(addr, |addr| self.io.get_ref().connect(addr))
+        each_addr(addr, |addr| self.io.get_ref().connect(addr)).await
     }
 
     /// Sends a datagram to `target` (its first address). Returns the number
     /// of bytes sent.
     pub async fn send_to(&self, buf: &[u8], target: impl ToSocketAddrs) -> io::Result<usize> {
-        let target = resolve(target)?[0];
+        let target = resolve(target).await?[0];
         poll_fn(|cx| self.poll_send_to(cx, buf, target)).await
     }
 

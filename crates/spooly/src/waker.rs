@@ -79,6 +79,12 @@ impl Shared {
         }
     }
 
+    /// Interrupts the runtime's wait, so that the loop re-checks its state.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn wake_loop(&self) {
+        self.unpark.unpark();
+    }
+
     /// Returns `true` if a remote wake is queued and not yet absorbed.
     pub(crate) fn has_pending_remote(&self) -> bool {
         self.has_remote.load(Ordering::Acquire)

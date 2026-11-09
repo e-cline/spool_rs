@@ -28,10 +28,13 @@
 //! # Address resolution
 //!
 //! Functions that take an address accept anything that implements
-//! [`ToSocketAddrs`] and try each address in turn.
-//! Resolving a host name (rather than an IP address) still blocks the
-//! thread for now; a later version resolves names on a thread pool.
+//! [`ToSocketAddrs`] (IP addresses, `"host:port"` strings, `(host, port)`
+//! pairs, ...) and try each address it resolves to in turn. A host name is
+//! resolved on the runtime's blocking pool ([`spooly::spawn_blocking`]), so
+//! it doesn't block the runtime's thread; [`lookup_host`] resolves one
+//! directly.
 
+mod addr;
 mod split;
 mod tcp;
 mod udp;
@@ -39,34 +42,25 @@ mod udp;
 mod unix;
 
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 
+use addr::resolve;
+
+pub use addr::{ToSocketAddrs, lookup_host};
 pub use split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 pub use tcp::{TcpListener, TcpStream};
 pub use udp::UdpSocket;
 #[cfg(unix)]
 pub use unix::{UnixDatagram, UnixListener, UnixStream};
 
-/// Resolves `addr` (this may block, for a host name).
-fn resolve(addr: impl ToSocketAddrs) -> io::Result<Vec<SocketAddr>> {
-    let addrs: Vec<_> = addr.to_socket_addrs()?.collect();
-    if addrs.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "could not resolve to any address",
-        ));
-    }
-    Ok(addrs)
-}
-
 /// Runs `f` on each address of `addr` until one succeeds; returns the last
 /// error otherwise.
-fn each_addr<T>(
+async fn each_addr<T>(
     addr: impl ToSocketAddrs,
     mut f: impl FnMut(SocketAddr) -> io::Result<T>,
 ) -> io::Result<T> {
     let mut last = None;
-    for addr in resolve(addr)? {
+    for addr in resolve(addr).await? {
         match f(addr) {
             Ok(t) => return Ok(t),
             Err(e) => last = Some(e),

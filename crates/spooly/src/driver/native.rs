@@ -64,6 +64,11 @@ pub(crate) fn drive<F: Future>(inner: &Inner, future: F, mode: Mode) -> F::Outpu
 /// With an I/O driver, I/O that is already ready comes before a clock
 /// jump (IO4): the driver is polled without blocking first, and the clock
 /// only jumps if nothing became ready and no remote wake is queued.
+///
+/// Nor does the clock jump while a `spawn_blocking` job is queued or
+/// running: the loop waits (in real time) for it to finish first. A job
+/// queues its wake before it stops counting as in flight, so the
+/// pending-remote check after the in-flight one can't miss it.
 fn wait_until(inner: &Inner, deadline: Instant) {
     let clock: &dyn Clock = inner.clock();
     let now = clock.now();
@@ -72,6 +77,14 @@ fn wait_until(inner: &Inner, deadline: Instant) {
     }
     if inner.has_io_driver() && (inner.wait(Some(Duration::ZERO)) || inner.has_pending_remote()) {
         return;
+    }
+    if inner.has_blocking_in_flight() {
+        // A finished job wakes the loop (through its waker or `KeepAlive`).
+        inner.wait(Some(deadline.saturating_duration_since(now)));
+        return;
+    }
+    if inner.has_pending_remote() {
+        return; // A job finished (or a thread woke a task) meanwhile.
     }
     if clock.advance_when_idle(deadline) {
         return;

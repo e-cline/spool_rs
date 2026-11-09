@@ -79,6 +79,14 @@ impl KeepAlive {
     }
 }
 
+impl KeepAlive {
+    /// Interrupts the runtime's wait (see `Shared::wake_loop`).
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn wake_loop(&self) {
+        self.shared.wake_loop();
+    }
+}
+
 impl Clone for KeepAlive {
     fn clone(&self) -> Self {
         KeepAlive::new(Arc::clone(&self.shared))

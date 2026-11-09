@@ -160,6 +160,18 @@
 //! unparked. While a detached task waits on another thread, hold a
 //! [`KeepAlive`] so that `run` doesn't exit first.
 //!
+//! For blocking or CPU-heavy work, [`spawn_blocking`] runs a closure on the
+//! runtime's thread pool and returns a handle that awaits its result (not
+//! on WASM, which has no threads):
+//!
+//! ```
+//! # #[cfg(not(target_family = "wasm"))]
+//! spooly::run(async {
+//!     let text = spooly::spawn_blocking(|| std::fs::read_to_string("Cargo.toml")).await;
+//!     assert!(text.unwrap().contains("[package]"));
+//! });
+//! ```
+//!
 //! ## I/O
 //!
 //! Spooly itself does no I/O. An I/O crate plugs a reactor into the loop
@@ -198,6 +210,8 @@
 
 #![warn(unreachable_pub)]
 
+#[cfg(not(target_family = "wasm"))]
+mod blocking;
 #[cfg(all(feature = "browser", target_arch = "wasm32"))]
 pub mod browser;
 mod clock;
@@ -212,6 +226,8 @@ mod timer;
 mod waker;
 mod yield_now;
 
+#[cfg(not(target_family = "wasm"))]
+pub use blocking::{BlockingHandle, spawn_blocking};
 pub use clock::{Clock, Instant, MockClock, SystemClock, now};
 pub use keep_alive::{KeepAlive, keep_alive};
 pub use queue::queue_microtask;

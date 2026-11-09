@@ -3,14 +3,14 @@
 use std::fmt;
 use std::future::poll_fn;
 use std::io;
-use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr};
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use mio::Interest;
 
 use super::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
-use super::{each_addr, impl_async_stream, resolve};
+use super::{ToSocketAddrs, each_addr, impl_async_stream, resolve};
 use crate::reactor::{Direction, PollEvented};
 
 /// A TCP socket listening for connections.
@@ -48,7 +48,7 @@ impl TcpListener {
     /// Outside a runtime with a [`Driver`](crate::Driver), like every
     /// constructor in this module.
     pub async fn bind(addr: impl ToSocketAddrs) -> io::Result<TcpListener> {
-        each_addr(addr, |addr| Self::new(mio::net::TcpListener::bind(addr)?))
+        each_addr(addr, |addr| Self::new(mio::net::TcpListener::bind(addr)?)).await
     }
 
     fn new(listener: mio::net::TcpListener) -> io::Result<TcpListener> {
@@ -127,7 +127,7 @@ impl TcpStream {
     /// Connects to `addr`, trying each address it resolves to in turn.
     pub async fn connect(addr: impl ToSocketAddrs) -> io::Result<TcpStream> {
         let mut last = None;
-        for addr in resolve(addr)? {
+        for addr in resolve(addr).await? {
             match Self::connect_addr(addr).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => last = Some(e),

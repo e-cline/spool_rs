@@ -52,7 +52,7 @@ makes sense, the browser) possible later.
 | Question | Recommendation |
 |---|---|
 | Library | **`mio` 1.x** for the native reactor, hidden behind a small internal trait so it could be swapped (§3) |
-| File I/O | A **small, self-written blocking thread pool** (`spawn_blocking`), completing over the existing remote-wake path (§6) |
+| File I/O | A **small, self-written blocking thread pool** in the core (`spooly::spawn_blocking`, IO17), completing over the existing remote-wake path (§6) |
 | Crate split | **Yes**: a Cargo workspace with `spooly` (the core, unchanged name) and a new **`spooly-io`** crate. The core gains one narrow, public extension point for I/O drivers (§5, §7) |
 | Loop change | An **I/O phase** after the timers phase, and drivers that wait on the reactor instead of parking the thread (§4) |
 | WASM | WASI 0.2: a second `spooly-io` backend on `wasi:io/poll`, after M10. Browser: no reactor; JS APIs are already awaitable (§8) |
@@ -180,8 +180,8 @@ something has to be able to wake it" (§3.5). The reactor *can* wake a task
 that is waiting for readiness, so:
 
 - `io.is_active()` is `true` while any registration has a stored waker (some
-  task is waiting to read, write, accept, …), or a `spawn_blocking` job is in
-  flight.
+  task is waiting to read, write, accept, …). (A `spawn_blocking` job keeps
+  the loop alive through its own `KeepAlive`, in the core: §6.)
 - A socket that exists but that nobody is awaiting does not keep `run`
   alive. A detached accept loop *does* (it is always waiting on `accept`),
   which is what a server wants.
@@ -324,22 +324,31 @@ help. **IO7. File operations run on a blocking thread pool**, as Tokio and
 smol do.
 
 ```rust
+// In the core: spooly::spawn_blocking (IO17).
 pub fn spawn_blocking<F, T>(f: F) -> BlockingHandle<T>
 where F: FnOnce() -> T + Send + 'static, T: Send + 'static;
 ```
 
-- `BlockingHandle<T>` is `!Send` and awaits to `T`. Dropping it detaches
-  the job. It can't abort a closure that is already running; it can cancel
-  one that hasn't started.
+- `BlockingHandle<T>` awaits to `T`. Dropping it detaches the job.
+  `cancel()` stops a job that hasn't started (and drops its closure at
+  once); nothing can stop one that is running.
 - The job's result goes into an `Arc<Mutex<…>>` slot and its waker is woken
   from the pool thread: the **existing remote-wake path** (§4.3 of the core
-  plan), which now wakes the reactor through the unparker. No new mechanism.
-- In-flight jobs count toward `is_active()` (IO3), so `run` waits for them.
-- The pool: `std::thread` workers, a `Mutex<VecDeque>` + `Condvar`, at
-  most 64 threads by default (configurable, IO13), workers exiting after
-  ~10 s idle, spawned lazily. It
-  is shared by all runtimes in the process, like Tokio's. It needs `std`
-  threads, so it doesn't exist on targets without them.
+  plan), which wakes the reactor through the unparker when there is one. No
+  new mechanism.
+- Each job holds a `KeepAlive` until it is done or cancelled, so `run`
+  waits for it, even detached (a dropped `File`'s last write finishes before
+  `run` returns, as a Node `fs` call without a callback would).
+- **IO19.** A `MockClock` doesn't jump while a job is queued or running:
+  the loop waits for it in real time instead, as Tokio's paused time does,
+  so `timeout(d, spawn_blocking(…))` is deterministic in tests.
+- The pool (IO18): one per runtime, created on the first `spawn_blocking`.
+  `std::thread` workers, a `Mutex<VecDeque>` + `Condvar`, at most 64
+  threads by default (`Builder::max_blocking_threads`, IO13), workers
+  spawned lazily and exiting after 10 s idle
+  (`Builder::blocking_idle_timeout`). Dropping the runtime drops the jobs
+  that haven't started; running ones finish on their own. It needs `std`
+  threads, so it doesn't exist on WASM.
 - Panics in a job: no catching (D11). The pool catches the unwind only to
   keep its worker alive, then re-raises it in the awaiting task when it polls
   the handle (`resume_unwind`), so the panic surfaces on the runtime's thread
@@ -359,6 +368,55 @@ On top of that, `spooly_io::fs` mirrors `std::fs`:
   the background.
 - DNS (`TcpStream::connect("host:port")`, `lookup_host`) also uses the pool,
   since `std`'s resolver blocks.
+
+### 6.1 Where the pool lives (IO17)
+
+The first draft put the pool in `spooly-io`. It moved to the core, as
+`spooly::spawn_blocking`, because it depends on nothing I/O-specific:
+
+- **What it needs is already core API.** A job completes through a `Send`
+  waker (the remote-wake path) and holds a `KeepAlive`, both public in the
+  core. It never touches the `IoDriver`. In `spooly-io` it would have
+  needed a `Driver` for no reason.
+- **No new dependencies.** It is `std` threads, a mutex and a condvar
+  (~350 lines), so the core stays dependency-free on native targets: the
+  reason for the split (§9.1) was `mio` and its platform crates, not this.
+- **Useful without I/O.** CPU-heavy work and blocking libraries (a SQLite
+  binding, compression) are a common need for a single-threaded executor,
+  with no sockets involved, like Node's libuv thread pool.
+- **The loop's rules belong to the core.** Liveness (`KeepAlive`), panics
+  (IO12, D11), and the `MockClock` rule (IO19) are core semantics; the core
+  is where they are tested (with Miri), not through a second crate.
+
+The costs: the core gains process-visible threads (but tasks still never
+leave the runtime's thread), and two `Builder` options. On WASM it is
+compiled out. `spooly_io::fs` and `lookup_host` build on it, so they need a
+Spooly runtime but not a `Driver`: plain `spooly::run` works.
+
+*As built (M14):*
+
+- `spooly::spawn_blocking`, `BlockingHandle` (`cancel`, `is_finished`),
+  `Builder::max_blocking_threads` (panics on 0) and
+  `Builder::blocking_idle_timeout`; all `cfg(not(target_family = "wasm"))`.
+- The handle isn't forced `!Send` (the first draft said it would be): it
+  is `Send` when `T` is, which costs nothing, since it only holds the
+  shared slot.
+- Polling a handle whose job was dropped unrun (its runtime shut down)
+  panics with a message, rather than staying pending forever.
+- `spooly_io::net::ToSocketAddrs` replaces `std`'s in every signature: a
+  sealed trait for the same input types, which resolves IP addresses on the
+  spot and sends only host names to the pool (`std`'s trait can't be used
+  there: a borrowed `&str` can't move to another thread). `&String` is not
+  implemented (`.as_str()` is); `&T` is, for `Copy` address types.
+- `lookup_host` returns `impl Iterator<Item = SocketAddr> + Debug`.
+- `fs`: the free functions, `try_exists`, `read_dir` (entries fetched 32
+  at a time; `next_entry` and `poll_next_entry`), `DirEntry` (async
+  `metadata` / `file_type`), `File` and `OpenOptions` (`From` a
+  `std::fs::OpenOptions`, for platform options such as a Unix `mode`).
+- `File` keeps the caller's position exact: data read ahead but not handed
+  out (only possible when a read is abandoned and retried smaller) is
+  accounted for by the next seek, write, `set_len` and `into_std`.
+  A write-behind error is returned once, by the next write or flush.
 
 ---
 
@@ -411,9 +469,9 @@ lookup_host("example.com:80").await?
 
 - `TcpListener::bind`, `TcpStream::connect`, `UdpSocket::bind`,
   `UdpSocket::connect` and `send_to` are `async` and take `impl
-  ToSocketAddrs`. Until M14 they resolve with `std`, which blocks the
-  thread for a host name (not for an IP address); M14 moves resolution to
-  the pool without changing the signatures.
+  ToSocketAddrs`. Until M14 they resolved with `std`, which blocked the
+  thread for a host name; since M14 they take `spooly_io::net::ToSocketAddrs`
+  and resolve names on the pool (§6, *As built (M14)*).
 - `UnixListener::bind`, `UnixDatagram::bind` and `connect` are plain
   functions (nothing to resolve); `UnixStream::connect` is `async`.
 - `poll_accept`, `poll_send_to` and `poll_recv_from` are public, for
@@ -447,9 +505,11 @@ third-party sockets and so on. (Later milestone, M15.)
 
 | Feature | Default | Contents |
 |---|---|---|
-| `net` | yes | TCP, UDP, Unix sockets, `lookup_host` (needs `blocking`) |
-| `fs` | yes | `spooly_io::fs` (needs `blocking`) |
-| `blocking` | yes | `spawn_blocking` and the pool |
+| `net` | yes | TCP, UDP, Unix sockets, `lookup_host` |
+| `fs` | yes | `spooly_io::fs` |
+
+(`spawn_blocking` and the pool are in the core since M14, IO17. None of
+these features exist yet: everything is always built.)
 | `socket2` | no | `from_socket2` / extra options |
 
 ### 7.5 Testing utilities
@@ -529,8 +589,9 @@ on other targets they're absent (`cfg`), not stubs that fail at run time.
 **IO9. Yes.** Reasons:
 
 - **The core stays dependency-free on native targets** (a stated goal).
-  `mio` brings `libc`/`windows-sys`; `fs` brings a thread pool; future
-  compat features would bring more. None of that belongs in a user's build that only wants
+  `mio` brings `libc`/`windows-sys`; future compat features would bring
+  more. (The blocking pool needs only `std`, so it went into the core after
+  all: IO17, §6.1.) None of that belongs in a user's build that only wants
   tasks and timers, or in a browser build.
 - **A clean boundary.** A separate crate can only use the core's public API,
   which forces the extension point (§5) to be real and documented. A feature
@@ -582,7 +643,6 @@ spool_rs/
 │       │   ├── reactor/    # mod.rs (Reactor, ScheduledIo), mio.rs, wasi.rs
 │       │   ├── net/        # tcp.rs, udp.rs, unix.rs, lookup.rs
 │       │   ├── fs/         # mod.rs (free functions), file.rs
-│       │   ├── blocking.rs # pool + spawn_blocking
 │       │   ├── async_fd.rs # Async<T> (M15)
 │       │   └── test.rs     # duplex / pipe
 │       ├── tests/          # loopback TCP/UDP, fs in a temp dir, liveness, stalls
@@ -631,10 +691,13 @@ to, and the "revisit if" column says what would prompt that.
 | IO10 | Public extension point, or hidden? | **Public**: `spooly::driver::IoDriver`, documented as unstable until 1.0 (§5.2) | The trait needs breaking changes often, or nobody but `spooly-io` implements it (then `#[doc(hidden)]` is an option) |
 | IO11 | I/O phase on every step, or only on otherwise idle steps? | **Every step that has registrations** (IO2); measure before changing | Benchmarks show the per-step non-blocking poll costs noticeably under load |
 | IO12 | `spawn_blocking` panics | **Re-raised in the awaiting task** with `resume_unwind`, so they unwind out of `run` like a task's panic (closest to D11); a detached job's panic is only printed (§6) | It proves confusing, or aborting turns out simpler and good enough |
-| IO13 | Blocking pool size | **At most 64 threads by default**, configurable through a builder option; idle workers exit after ~10 s (§6) | Workloads (many concurrent file operations) hit the cap |
+| IO13 | Blocking pool size | **At most 64 threads by default** (`Builder::max_blocking_threads`); idle workers exit after 10 s (`Builder::blocking_idle_timeout`) (§6) | Workloads (many concurrent file operations) hit the cap |
 | IO14 | Tokio `AsyncRead`/`AsyncWrite` impls (`tokio-io` feature) | **Punted.** Not in the plan's milestones; `spooly-io` implements only the `futures-io` traits. Users can bridge with `tokio-util`'s `compat` adapters meanwhile | Users need `hyper` or other Tokio-trait crates and the compat adapters aren't enough |
 | IO15 | WASI 0.2 sockets: the `wasi` crate, or `std::net` on `wasip2`? | **Deferred to M16**, decided when the WASI backend is built (§8.2) | — |
 | IO16 | A facade crate re-exporting core and I/O | **Not now.** Add one later only if two crates prove awkward (§9.1) | Users find `spooly` + `spooly-io` awkward, or publishing makes a single entry point desirable |
+| IO17 | `spawn_blocking` in the core or in `spooly-io`? | **The core** (`spooly::spawn_blocking`): it needs only `KeepAlive` and remote wakes, and `std` (§6.1). Decided in M14 | The pool needs something I/O-specific, or its threads become a burden for core-only users |
+| IO18 | One pool per process, or per runtime? | **Per runtime**, created on first use: the `Builder` configures it, it shuts down with its runtime, and tests stay isolated (Tokio's pool is per runtime too) | Many short-lived runtimes each start threads that a shared pool would reuse |
+| IO19 | Does a `MockClock` jump while a blocking job runs? | **No**: the loop waits for the job in real time first, as Tokio's paused time does (§6) | A test needs time to pass during a job that never ends (a server loop on the pool) |
 
 ---
 
@@ -648,7 +711,7 @@ and is only a prerequisite for M16.
 | M11 | Workspace | done | Move the crate to `crates/spooly`; root `[workspace]` with shared package fields, lints and dependencies; CI with `--workspace`. No code change; every test passes unchanged. |
 | M12 | Core hook | done | `spooly::driver::IoDriver`, `Builder::io_driver`, `current_io_driver`; the unparker in `Shared`; the I/O phase and `is_active` in `step()` (IO2, IO3); native driver waits through the driver and handles `MockClock` (IO4). Tested with a fake in-crate driver (scripted readiness, a counting unparker): phase order, timers-plus-I/O fairness, liveness, remote wakes interrupting `wait`. No behavior change without a driver; model and browser suites unchanged. |
 | M13 | `spooly-io` net | done | The crate, `mio` reactor (IO1, §5.3), `Driver`, `run`/`block_on`, TCP/UDP/Unix, `futures-io` traits, `halves`/`into_split`, `readable`/`writable`, `unref`. Loopback tests on all three OSes; liveness and stall tests; drop and cancellation tests; an echo-server example. |
-| M14 | Blocking + fs | | The pool, `spawn_blocking` (IO7), `lookup_host` and string-address `connect`, `spooly_io::fs` (free functions, then `File`). Tests in temp dirs, pool shutdown and idle exit, panic propagation. |
+| M14 | Blocking + fs | done | The pool and `spooly::spawn_blocking` in the core (IO7, IO17–IO19), `lookup_host` and string-address `connect`, `spooly_io::fs` (free functions, then `File`). Tests in temp dirs, pool shutdown and idle exit, panic propagation; the pool's tests run under Miri. |
 | M15 | Extras | | `test::{duplex, pipe}`; `Async<T>`; `socket2` feature; I/O operations in the reference model through `duplex` (optional). |
 | M16 | WASI 0.2 | | After M10: the pollable backend (§8.2), `wasi:sockets`, inline `fs`; the `spooly-io` suite (minus threads) under wasmtime in CI. |
 | — | Later | | `io_uring`, processes, signals, stdio, a web-streams adapter crate (§8.3, §10). |

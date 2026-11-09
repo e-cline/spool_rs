@@ -419,6 +419,7 @@ crates/spooly/
 │   │   ├── interval.rs # Interval
 │   │   └── timeout.rs  # Timeout, Elapsed
 │   ├── clock.rs        # Instant, Clock trait, SystemClock, MockClock
+│   ├── blocking.rs     # (M14) spawn_blocking and the per-runtime thread pool
 │   ├── driver.rs       # MainTask, shared by the drivers of §7; the public
 │   │                   # IoDriver hook (M12, ASYNC_IO_PLAN.md §5)
 │   └── driver/
@@ -785,6 +786,9 @@ differ.*
   blocking thread pool** that completes back to the loop over the remote-wake
   path. On Linux, `io_uring` is an optional backend. Native only.
 - `spawn_blocking(f) -> JoinHandle<T>`, where `f: Send` but the handle is `!Send`.
+  *Built in M14 as `spooly::spawn_blocking` in this crate (a per-runtime
+  pool; `BlockingHandle<T>`, `Send` when `T` is); see `docs/ASYNC_IO_PLAN.md`
+  §6.*
 
 ### 9.3 More scheduling and utilities
 

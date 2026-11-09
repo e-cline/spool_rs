@@ -48,9 +48,11 @@ semantics.
 > [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md) §12.
 >
 > Async I/O is in progress ([`docs/ASYNC_IO_PLAN.md`](docs/ASYNC_IO_PLAN.md)):
-> M11 (a Cargo workspace), M12 (an I/O driver hook in the core), and M13
-> ([`crates/spooly-io`](crates/spooly-io): TCP, UDP and Unix sockets) are
-> done. Next: M14, a blocking thread pool and file I/O.
+> M11 (a Cargo workspace), M12 (an I/O driver hook in the core), M13
+> ([`crates/spooly-io`](crates/spooly-io): TCP, UDP and Unix sockets), and
+> M14 (`spooly::spawn_blocking`, a thread pool in the core; `spooly_io::fs`
+> and DNS on it) are done. Next: M15, extras (in-memory test streams,
+> `Async<T>`).
 
 The crate docs (`cargo doc --open`) are the guide: the closest JS
 counterparts, the event loop, cancellation, panics, threads, and testing
