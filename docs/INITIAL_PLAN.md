@@ -760,6 +760,10 @@ that coverage into the model, and removed the Node fuzzer.)*
 
 ## 9. Future work
 
+*§9.1 and §9.2 are expanded into a full design in
+[`ASYNC_IO_PLAN.md`](ASYNC_IO_PLAN.md), which supersedes them where they
+differ.*
+
 ### 9.1 Async network I/O
 - Add an **I/O poll phase** to `step()`, after timers.
 - Add a reactor driver on top of the OS readiness API (kqueue, epoll, and
