@@ -1,4 +1,6 @@
 # `cargo test --target wasm32-wasip2` runs the test binaries under wasmtime
-# (plan M10). Other targets are unaffected.
+# (plan M10, M16). Other targets are unaffected. The tests may use the host's
+# network (loopback sockets, host-name lookups) and its `/tmp` (the temp
+# directory on WASI, for `spooly_io::fs`).
 [target.wasm32-wasip2]
-runner = "wasmtime run"
+runner = "wasmtime run -S inherit-network=y -S allow-ip-name-lookup=y --dir /tmp"

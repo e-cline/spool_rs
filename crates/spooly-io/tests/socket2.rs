@@ -12,6 +12,7 @@ use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use spooly_io::net::{TcpListener, TcpStream, UdpSocket};
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no `SO_BROADCAST`")]
 fn options_through_a_sock_ref() -> io::Result<()> {
     let _w = watchdog("options_through_a_sock_ref");
     spooly_io::block_on(async {
@@ -32,6 +33,10 @@ fn options_through_a_sock_ref() -> io::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "wasi",
+    ignore = "WASI has no `SO_REUSEADDR` or `SO_LINGER`"
+)]
 fn a_listener_configured_with_socket2() -> io::Result<()> {
     let _w = watchdog("a_listener_configured_with_socket2");
     // Set options that must come before `bind`, then hand the socket over.

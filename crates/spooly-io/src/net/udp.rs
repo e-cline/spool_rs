@@ -95,6 +95,8 @@ impl UdpSocket {
     }
 
     /// Receives a datagram without removing it from the queue.
+    ///
+    /// Not supported on WASI: it fails with an error there.
     pub async fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         poll_fn(|cx| self.io.poll_io(cx, Direction::Read, |s| s.peek_from(buf))).await
     }
@@ -125,6 +127,8 @@ impl UdpSocket {
     }
 
     /// Allows (or forbids) sending broadcast datagrams.
+    ///
+    /// Not supported on WASI: it fails with an error there.
     pub fn set_broadcast(&self, on: bool) -> io::Result<()> {
         self.io.get_ref().set_broadcast(on)
     }

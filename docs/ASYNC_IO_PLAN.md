@@ -1,6 +1,6 @@
 # Spooly — Async I/O Design & Plan
 
-> Status: **v2, reviewed.** M11–M15 are built; see §12. This document
+> Status: **v2, reviewed.** M11–M16 are built; see §12. This document
 > expands §9.1 and §9.2 of [`INITIAL_PLAN.md`](INITIAL_PLAN.md) into a
 > design and milestones. Decisions are tagged `IO#` so they don't collide
 > with the core plan's `D#` numbers. v2 settles draft v1's open questions
@@ -33,6 +33,8 @@ it makes sense, the browser) possible later.
 - **The core stays dependency-free on native targets.** I/O is opt-in.
 - **WASM later, without a redesign**: the core's extension point (§5) must be
   implementable by a WASI 0.2 backend that has no threads and no `mio`.
+  *(As built in M16, WASI uses `mio` too, §8.2; the shape still allows a
+  backend without it.)*
 
 ### Non-goals (for now)
 
@@ -55,7 +57,7 @@ it makes sense, the browser) possible later.
 | File I/O | A **small, self-written blocking thread pool** in the core (`spooly::spawn_blocking`, IO17), completing over the existing remote-wake path (§6) |
 | Crate split | **Yes**: a Cargo workspace with `spooly` (the core, unchanged name) and a new **`spooly-io`** crate. The core gains one narrow, public extension point for I/O drivers (§5, §7) |
 | Loop change | An **I/O phase** after the timers phase, and drivers that wait on the reactor instead of parking the thread (§4) |
-| WASM | WASI 0.2 (the only WASI version supported): a second `spooly-io` backend on `wasi:io/poll` (M16). Browser: no reactor; JS APIs are already awaitable (§8) |
+| WASM | WASI 0.2 (the only WASI version supported): the same `mio` reactor, which runs there on wasi-libc's `poll` over `wasi:io/poll` (M16, IO15). Browser: no reactor; JS APIs are already awaitable (§8) |
 
 ---
 
@@ -85,7 +87,7 @@ lives. The question is layers 1 and 2.
 | **`blocking`** (smol) | A thread pool for blocking work. | **Not needed.** It pulls in `async-channel`, `async-task` and more; the pool we need is ~150 lines of `std` (§6). |
 | **`socket2`** | Socket options `std` lacks (`SO_REUSEPORT`, keepalive tuning, …). | Optional, later, as a `spooly-io` feature. `std` + `mio` cover the basics. |
 | **`futures-io`** | Just the `AsyncRead`/`AsyncWrite`/`AsyncBufRead`/`AsyncSeek` traits. | **Yes.** Tiny, no dependencies of note, the common denominator of the executor-agnostic ecosystem. |
-| **`wasi`** (Bytecode Alliance) | Generated bindings for WASI 0.2 interfaces (`wasi:io/poll`, `wasi:sockets`, `wasi:filesystem`). | **Yes, for the WASI backend** (§8.2), target-gated. |
+| **`wasi`** (Bytecode Alliance) | Generated bindings for WASI 0.2 interfaces (`wasi:io/poll`, `wasi:sockets`, `wasi:filesystem`). | Planned for a WASI backend; **not needed** after all (M16, IO15): `mio` runs on WASI 0.2 (§8.2). |
 
 ### 3.2 Decision
 
@@ -290,7 +292,7 @@ embedder needs to fold Spooly into a GUI or game loop: it moves the "public
 
 ```rust
 struct Reactor {                     // !Send, one per runtime
-    poll: mio::Poll,                 // or the WASI pollable list (§8.2)
+    poll: mio::Poll,                 // on WASI too (M16, §8.2)
     events: RefCell<mio::Events>,    // filled by wait, drained by poll_ready
     sources: RefCell<Slab<ScheduledIo>>,   // reuses the core's generational slab idea
     unparker: Arc<mio::Waker>,
@@ -578,24 +580,44 @@ a WASI program can wait without a timer.
 
 WASI 0.2 has exactly the readiness primitive we need: every stream, socket
 and timer exposes a `pollable`, and `wasi:io/poll.poll(list)` blocks until
-some are ready. The plan:
+some are ready. *(Draft v1 and v2 planned a second backend on it, with the
+`wasi` crate's bindings: `ScheduledIo` holding a `Pollable`, and `wait`
+polling them plus a `monotonic-clock` pollable. M16 found that
+unnecessary.)*
 
-- A `spooly-io` backend for `target_os = "wasi"` + `target_env = "p2"`,
-  using the `wasi` crate's bindings, with the same `Reactor` shape (§5.3):
-  `ScheduledIo` holds a `Pollable` instead of a `mio` token, `wait(timeout)`
-  calls `poll` on the waiting pollables plus a
-  `monotonic-clock.subscribe-duration(timeout)` pollable, and `poll_ready`
-  wakes the tasks whose pollables are ready.
-- Network: `wasi:sockets` (`tcp`, `udp`, `ip-name-lookup`, which is
-  non-blocking there, so no thread pool is needed for DNS).
-- Files: `wasi:filesystem` offers stream-based reads and writes with
-  pollables, but hosts implement most file operations synchronously. Without
-  threads there's no pool, so `fs` runs operations inline (they don't block
-  on the network, only on the host's disk), possibly yielding between chunks.
-  `spawn_blocking` isn't available there.
-- M10 (the core on WASI) is done; what remains is choosing between the
-  `wasi` crate and `std`'s own WASI 0.2 networking (`std::net` on
-  `wasip2`) for the socket types (IO15).
+**As built (M16): the same `mio` reactor (IO15).** `mio` 1.x supports
+`wasm32-wasip2` through its Unix backend: its `Poll` is wasi-libc's
+`poll()`, which wasi-libc implements on `wasi:io/poll` over the sockets'
+pollables, and `mio::net`'s TCP and UDP types are wasi-libc's sockets over
+`wasi:sockets`. So `Driver`, `ScheduledIo`, `net` and the readiness logic
+are unchanged; the differences are small and local:
+
+- **Unparker.** `mio` has no `Waker` on WASI. None is needed: with no
+  threads, nothing can run while the driver waits, so the unparker does
+  nothing there (`reactor.rs`, `new_unparker`).
+- **Blocking work runs inline.** There is no pool (core plan D16), so the
+  work `spooly-io` sends to `spawn_blocking` natively, every `fs` operation
+  and host-name lookups, runs on the runtime's thread instead, and the loop
+  waits for it. One internal helper, `blocking::spawn`, is
+  `spooly::spawn_blocking` where there are threads and runs the closure at
+  once on WASM (returning a ready future), so `fs` and `net` have no `cfg`s
+  for it. File operations go through `wasi:filesystem` (via `std::fs`),
+  which hosts implement synchronously anyway.
+- **Gaps in wasi-libc's socket emulation.** `peek` / `peek_from`
+  (`MSG_PEEK`), and some options (`SO_BROADCAST`, `SO_REUSEADDR`,
+  `SO_LINGER`) fail with an error; `writev` sends only its first buffer (a
+  legal partial write). `fs::set_permissions` is unsupported too. The crate
+  docs list these; the tests that use them are ignored on WASI.
+- **Host permissions.** The host grants network and file access: the test
+  runner (`.cargo/config.toml`) runs `wasmtime run -S inherit-network
+  -S allow-ip-name-lookup --dir /tmp`.
+
+Not done: `Async<T>` (Unix-only, IO20), and a non-blocking host-name
+lookup. `wasi:sockets/ip-name-lookup` has its own pollable, but `mio` can't
+wait on a raw pollable, so using it would mean the `wasi` crate plus a way
+to poll it alongside `mio` (or the hand-written backend after all). Worth
+it only if lookups on WASI prove slow in practice.
+
 - **WASI 0.3** adds native async to the component model (`future`/`stream`
   types and an async ABI). That could replace the pollable backend later; it
   doesn't change the `IoDriver` shape.
@@ -683,7 +705,8 @@ spool_rs/
 │   └── spooly-io/
 │       ├── src/
 │       │   ├── lib.rs      # run / block_on, Driver, features
-│       │   ├── reactor/    # mod.rs (Reactor, ScheduledIo), mio.rs, wasi.rs
+│       │   ├── reactor.rs  # Driver, ScheduledIo (one backend: mio, M16)
+│       │   ├── blocking.rs # (M16) blocking work: the pool, or inline on WASI
 │       │   ├── net/        # tcp.rs, udp.rs, unix.rs, lookup.rs
 │       │   ├── fs/         # mod.rs (free functions), file.rs
 │       │   ├── async_fd.rs # Async<T> (M15)
@@ -736,7 +759,7 @@ to, and the "revisit if" column says what would prompt that.
 | IO12 | `spawn_blocking` panics | **Re-raised in the awaiting task** with `resume_unwind`, so they unwind out of `run` like a task's panic (closest to D11); a detached job's panic is only printed (§6) | It proves confusing, or aborting turns out simpler and good enough |
 | IO13 | Blocking pool size | **At most 64 threads by default** (`Builder::max_blocking_threads`); idle workers exit after 10 s (`Builder::blocking_idle_timeout`) (§6) | Workloads (many concurrent file operations) hit the cap |
 | IO14 | Tokio `AsyncRead`/`AsyncWrite` impls (`tokio-io` feature) | **Punted.** Not in the plan's milestones; `spooly-io` implements only the `futures-io` traits. Users can bridge with `tokio-util`'s `compat` adapters meanwhile | Users need `hyper` or other Tokio-trait crates and the compat adapters aren't enough |
-| IO15 | WASI 0.2 sockets: the `wasi` crate, or `std::net` on `wasip2`? | **Deferred to M16**, decided when the WASI backend is built (§8.2) | — |
+| IO15 | WASI 0.2 sockets: the `wasi` crate, or `std::net` on `wasip2`? | **Neither: `mio`** (decided in M16). `mio` 1.x runs on `wasip2` (wasi-libc's `poll` and sockets), so the native reactor serves WASI unchanged, with no new dependency and no `unsafe` of ours. `std::net` alone has no readiness API without `unsafe`; the `wasi` crate would mean a second reactor and socket types on `wasi:sockets` streams (§8.2) | Host-name lookups blocking the loop, or a socket feature wasi-libc lacks, matter to a real user (then: the `wasi` crate for that piece) |
 | IO16 | A facade crate re-exporting core and I/O | **Not now.** Add one later only if two crates prove awkward (§9.1) | Users find `spooly` + `spooly-io` awkward, or publishing makes a single entry point desirable |
 | IO17 | `spawn_blocking` in the core or in `spooly-io`? | **The core** (`spooly::spawn_blocking`): it needs only `KeepAlive` and remote wakes, and `std` (§6.1). Decided in M14 | The pool needs something I/O-specific, or its threads become a burden for core-only users |
 | IO18 | One pool per process, or per runtime? | **Per runtime**, created on first use: the `Builder` configures it, it shuts down with its runtime, and tests stay isolated (Tokio's pool is per runtime too) | Many short-lived runtimes each start threads that a shared pool would reuse |
@@ -760,5 +783,5 @@ first numbered M11, is now M17.
 | M13 | `spooly-io` net | done | The crate, `mio` reactor (IO1, §5.3), `Driver`, `run`/`block_on`, TCP/UDP/Unix, `futures-io` traits, `halves`/`into_split`, `readable`/`writable`, `unref`. Loopback tests on all three OSes; liveness and stall tests; drop and cancellation tests; an echo-server example. |
 | M14 | Blocking + fs | done | The pool and `spooly::spawn_blocking` in the core (IO7, IO17–IO19), `lookup_host` and string-address `connect`, `spooly_io::fs` (free functions, then `File`). Tests in temp dirs, pool shutdown and idle exit, panic propagation; the pool's tests run under Miri. |
 | M15 | Extras | done | `test::{duplex, pipe}`; `Async<T>` (Unix, IO20, IO22); the OS-handle traits on every socket instead of a `socket2` feature (IO21); `copy` and `scan` examples. Not done: I/O operations in the reference model through `duplex` (optional). |
-| M16 | WASI 0.2 | | The pollable backend (§8.2), `wasi:sockets`, inline `fs`; the `spooly-io` suite (minus threads) under wasmtime in CI, next to the core's (M10), and the core's `io_driver.rs` there if a thread-free fake reactor is worth it. `wasm32-wasip2` only. |
+| M16 | WASI 0.2 | done | IO15: the `mio` reactor on `wasm32-wasip2` instead of a pollable backend (§8.2): `net` (TCP, UDP), `fs` and lookups, with a no-op unparker and blocking work run inline (`blocking::spawn`). The `spooly-io` suite under wasmtime in CI next to the core's, with network and `/tmp` access; tests needing threads, the pool, or socket features WASI lacks are ignored there, with the reason. Not done: `Async<T>` (Unix only), non-blocking lookups, and the core's `io_driver.rs` on WASI (the real reactor now tests that path). |
 | — | Later | | `io_uring`, processes, signals, stdio, a web-streams adapter crate (§8.3, §10). |

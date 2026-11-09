@@ -10,6 +10,31 @@ use common::watchdog;
 use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use spooly_io::fs::{self, File, OpenOptions};
 
+/// The temp directory. `std::env::temp_dir` panics on WASI, where the test
+/// runner preopens `/tmp` (see `.cargo/config.toml`).
+fn temp_base() -> PathBuf {
+    if cfg!(target_os = "wasi") {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
+/// Unique to this test process: its id, or on WASI (which has no process
+/// ids) the time it started.
+fn unique() -> u128 {
+    if cfg!(target_os = "wasi") {
+        static START: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+        *START.get_or_init(|| {
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .map_or(0, |d| d.as_nanos())
+        })
+    } else {
+        u128::from(std::process::id())
+    }
+}
+
 /// A fresh, empty directory in the temp directory, removed on drop.
 struct TempDir(PathBuf);
 
@@ -17,8 +42,7 @@ impl TempDir {
     fn new(name: &str) -> TempDir {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("spooly-io-fs-{}-{name}-{n}", std::process::id()));
+        let path = temp_base().join(format!("spooly-io-fs-{}-{name}-{n}", unique()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         TempDir(path)
@@ -63,12 +87,18 @@ fn whole_file_functions() -> io::Result<()> {
 
         let mut perm = fs::metadata(&c).await?.permissions();
         perm.set_readonly(true);
-        fs::set_permissions(&c, perm.clone()).await?;
-        assert!(fs::metadata(&c).await?.permissions().readonly());
-        // Writable again (so the directory can be removed on Windows).
-        #[allow(clippy::permissions_set_readonly_false)]
-        perm.set_readonly(false);
-        fs::set_permissions(&c, perm).await?;
+        if cfg!(target_os = "wasi") {
+            // WASI has no way to set permissions.
+            let err = fs::set_permissions(&c, perm).await.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        } else {
+            fs::set_permissions(&c, perm.clone()).await?;
+            assert!(fs::metadata(&c).await?.permissions().readonly());
+            // Writable again (so the directory can be removed on Windows).
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(false);
+            fs::set_permissions(&c, perm).await?;
+        }
 
         fs::remove_file(&c).await?;
         let err = fs::read(&c).await.unwrap_err();
@@ -161,11 +191,36 @@ fn file_write_then_read_back() -> io::Result<()> {
     })
 }
 
+#[test]
+fn seeks() -> io::Result<()> {
+    let _w = watchdog("seeks");
+    let dir = TempDir::new("plain-seek");
+    let path = dir.join("f");
+    std::fs::write(&path, b"0123456789")?;
+    spooly::block_on(async {
+        let mut file = File::open(&path).await?;
+        let mut two = [0; 2];
+        assert_eq!(file.seek(SeekFrom::Start(3)).await?, 3);
+        file.read_exact(&mut two).await?;
+        assert_eq!(&two, b"34");
+        assert_eq!(file.seek(SeekFrom::Current(-1)).await?, 4);
+        assert_eq!(file.seek(SeekFrom::End(-1)).await?, 9);
+        assert_eq!(file.read(&mut two).await?, 1);
+        assert_eq!(two[0], b'9');
+        Ok(())
+    })
+}
+
+// `one_thread`, `read_ahead` and the tests that use them need the blocking
+// pool: on WASI, `fs` runs inline, so no read is ever left in flight.
+
 /// A runtime whose blocking pool has one thread, for [`read_ahead`].
+#[cfg(not(target_family = "wasm"))]
 fn one_thread() -> spooly::Runtime {
     spooly::Runtime::builder().max_blocking_threads(1).build()
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// Makes `file` read `ahead` bytes from the OS but hand out only
 /// `take.len()` of them, leaving the rest in its buffer: a read of `ahead`
 /// is started and abandoned (it can't finish: the pool's only thread is
@@ -182,6 +237,7 @@ async fn read_ahead(file: &mut File, ahead: usize, take: &mut [u8]) -> io::Resul
 }
 
 #[test]
+#[cfg(not(target_family = "wasm"))] // Needs `read_ahead`.
 fn seeks_account_for_data_read_ahead() -> io::Result<()> {
     let _w = watchdog("seeks_account_for_data_read_ahead");
     let dir = TempDir::new("seek");
@@ -209,6 +265,7 @@ fn seeks_account_for_data_read_ahead() -> io::Result<()> {
 }
 
 #[test]
+#[cfg(not(target_family = "wasm"))] // Needs `read_ahead`.
 fn leftover_data_is_handed_out_first() -> io::Result<()> {
     let _w = watchdog("leftover_data_is_handed_out_first");
     let dir = TempDir::new("leftover");
@@ -226,6 +283,7 @@ fn leftover_data_is_handed_out_first() -> io::Result<()> {
 }
 
 #[test]
+#[cfg(not(target_family = "wasm"))] // Needs `read_ahead`.
 fn a_write_after_reading_ahead_goes_where_the_caller_is() -> io::Result<()> {
     let _w = watchdog("a_write_after_reading_ahead_goes_where_the_caller_is");
     let dir = TempDir::new("partial");
@@ -268,6 +326,7 @@ fn large_files_round_trip() -> io::Result<()> {
 }
 
 #[test]
+#[cfg(not(target_family = "wasm"))] // Needs `read_ahead`.
 fn set_len_and_sync_data() -> io::Result<()> {
     let _w = watchdog("set_len_and_sync_data");
     let dir = TempDir::new("set-len");
@@ -307,6 +366,7 @@ fn set_len_and_sync_data() -> io::Result<()> {
 }
 
 #[test]
+#[cfg(not(target_family = "wasm"))] // Needs `read_ahead`.
 fn into_std_gives_back_the_callers_position() -> io::Result<()> {
     let _w = watchdog("into_std_gives_back_the_callers_position");
     let dir = TempDir::new("into-std");

@@ -195,6 +195,7 @@ fn readable_then_try_read() -> io::Result<()> {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no `MSG_PEEK`")]
 fn peek_does_not_consume() -> io::Result<()> {
     let _w = watchdog("peek_does_not_consume");
     spooly_io::block_on(async {
