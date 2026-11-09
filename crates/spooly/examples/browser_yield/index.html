@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spooly: staying responsive</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; }
+    code, #frames, .result { font-family: ui-monospace, monospace; }
+    .row { display: flex; gap: 1rem; align-items: baseline; margin: .8rem 0; }
+    .row button { flex: none; width: 11rem; padding: .4rem; }
+    .result { font-size: .9rem; color: #444; }
+  </style>
+</head>
+<body>
+  <h1>Staying responsive</h1>
+  <p>Frames drawn: <b id="frames">0</b>, counted by a plain <code>requestAnimationFrame</code> loop.
+     Watch it (and try selecting text) while a job runs.</p>
+
+  <div class="row"><button id="btn-blocking">No yielding</button>
+    <span class="result" id="blocking">one long poll</span></div>
+  <div class="row"><button id="btn-yield">yield_now()</button>
+    <span class="result" id="yield">5ms slices, a microtask between them</span></div>
+  <div class="row"><button id="btn-sleep">sleep(1ms)</button>
+    <span class="result" id="sleep">5ms slices, a timer between them</span></div>
+
+  <script>
+    let frames = 0;
+    const count = () => { document.getElementById("frames").textContent = ++frames; requestAnimationFrame(count); };
+    requestAnimationFrame(count);
+  </script>
+  <script type="module">
+    // Built by `wasm-bindgen --target web` (see main.rs).
+    import init from "./pkg/browser_yield.js";
+    init();
+  </script>
+</body>
+</html>

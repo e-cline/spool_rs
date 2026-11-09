@@ -68,6 +68,10 @@ cargo run --example intervals      # intervals on a fixed schedule, shared state
 cargo run --example cancellation   # timeouts, abort, abort_on_drop, cancelling timers
 cargo run --example panics         # errors as `Result`s, try_join on abort, a panic stopping the loop
 cargo run --example threads        # waking `!Send` tasks from worker threads, KeepAlive
+cargo run --example event_loop_order  # sync code, microtasks, spawn, yield_now, timers: who runs when
+cargo run --example mock_clock     # MockClock: retries with backoff, hours of timers in microseconds
+cargo run --example channel        # a bounded `!Send` channel from scratch, with backpressure
+cargo run --example actor          # a task owning its state, with request/reply and no locks
 cargo run -p spooly-io --example echo   # an echo server and clients on one thread
 cargo run -p spooly-io --example copy   # a file copy on the blocking pool, with a ticker running meanwhile
 cargo run -p spooly-io --example scan   # a concurrent TCP port scan with timeouts
@@ -97,6 +101,12 @@ wasm-bindgen --target web --out-dir crates/spooly/examples/browser/pkg \
     target/wasm32-unknown-unknown/release/examples/browser.wasm
 python3 -m http.server -d crates/spooly/examples/browser   # then open http://localhost:8000
 ```
+
+Two more pages build the same way (swap the example name):
+[`browser_debounce`](crates/spooly/examples/browser_debounce) (a debounced search box, with
+`Sleep::reset` and cancelling a stale search) and
+[`browser_yield`](crates/spooly/examples/browser_yield) (why `yield_now` doesn't keep a page
+responsive, and what does).
 
 ## Development
 

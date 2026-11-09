@@ -43,6 +43,18 @@ path = "examples/browser/main.rs"
 crate-type = ["cdylib"]
 required-features = ["browser"]
 
+[[example]]
+name = "browser_debounce"
+path = "examples/browser_debounce/main.rs"
+crate-type = ["cdylib"]
+required-features = ["browser"]
+
+[[example]]
+name = "browser_yield"
+path = "examples/browser_yield/main.rs"
+crate-type = ["cdylib"]
+required-features = ["browser"]
+
 [[bench]]
 name = "throughput"
 harness = false
