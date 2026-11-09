@@ -168,7 +168,7 @@
 //! each step of the loop then runs from a JS callback: a page can't block
 //! its thread. The ordering is the same as on native. The `browser` module
 //! docs (built for that target) have the details, and
-//! `examples/browser` in the repository is a small page.
+//! `crates/spooly/examples/browser` in the repository is a small page.
 //!
 //! ## Testing
 //!

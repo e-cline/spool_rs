@@ -24,7 +24,7 @@ rustc-ice-*.txt
 #.idea/
 
 # wasm-bindgen output for the browser example
-examples/browser/pkg/
+crates/spooly/examples/browser/pkg/
 
 # Claude Code worktrees
 .claude/worktrees/

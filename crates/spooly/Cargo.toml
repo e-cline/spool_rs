@@ -1,0 +1,48 @@
+[package]
+name = "spooly"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "A lightweight, single-threaded async executor inspired by the JavaScript event loop. No Send/Sync required."
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["async", "executor", "runtime", "single-threaded", "event-loop"]
+categories = ["asynchronous"]
+publish = false
+
+[features]
+# The browser driver and `PerformanceClock`, for `wasm32-unknown-unknown`
+# (see the `browser` module). It does nothing on other targets.
+browser = ["dep:wasm-bindgen"]
+
+[dependencies]
+# Kept minimal: each dependency must earn its place. None are needed on
+# native targets today.
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true, optional = true }
+
+[dev-dependencies]
+futures.workspace = true # For `join!` in examples/intervals.rs.
+static_assertions.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest.workspace = true
+trybuild.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true
+
+[lints]
+workspace = true
+
+[[example]]
+name = "browser"
+path = "examples/browser/main.rs"
+crate-type = ["cdylib"]
+required-features = ["browser"]
+
+[[bench]]
+name = "throughput"
+harness = false

@@ -30,16 +30,16 @@ jobs:
           # The trybuild .stderr files include std source snippets, which
           # rustc only prints when rust-src is installed.
           components: rust-src
-      - run: cargo test --all-targets
+      - run: cargo test --workspace --all-targets
         env:
           # Beta's diagnostics differ from the stable wording the trybuild
           # .stderr files pin. Regenerate them (TRYBUILD=overwrite) when
           # stable catches up.
           SPOOLY_SKIP_UI: ${{ matrix.toolchain == 'beta' && '1' || '0' }}
-      - run: cargo test --doc
+      - run: cargo test --workspace --doc
       - name: Stress tests
         if: github.event_name == 'schedule'
-        run: cargo test --release --test stress -- --ignored
+        run: cargo test --release -p spooly --test stress -- --ignored
 
   coverage:
     runs-on: ubuntu-latest
@@ -50,7 +50,7 @@ jobs:
           components: llvm-tools-preview, rust-src
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Line coverage (at least 90%)
-        run: cargo llvm-cov --all-targets --fail-under-lines 90 --summary-only
+        run: cargo llvm-cov --workspace --all-targets --fail-under-lines 90 --summary-only
 
   lint:
     runs-on: ubuntu-latest
@@ -61,14 +61,14 @@ jobs:
           components: clippy, rustfmt
           targets: wasm32-unknown-unknown
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets
-      - run: cargo doc --no-deps
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo doc --workspace --no-deps
       - name: Clippy and docs for the browser (includes the browser example)
         run: |
-          cargo clippy --all-targets --target wasm32-unknown-unknown --features browser
-          cargo doc --no-deps --target wasm32-unknown-unknown --features browser
+          cargo clippy -p spooly --all-targets --target wasm32-unknown-unknown --features browser
+          cargo doc -p spooly --no-deps --target wasm32-unknown-unknown --features browser
       - name: Benchmarks compile
-        run: cargo bench --no-run
+        run: cargo bench --workspace --no-run
 
   wasm:
     name: check (${{ matrix.target }})
@@ -84,7 +84,7 @@ jobs:
           targets: ${{ matrix.target }}
       # Without features. The browser job tests `wasm32-unknown-unknown`
       # with `browser`; M10 adds the WASI tests.
-      - run: cargo check --target ${{ matrix.target }}
+      - run: cargo check --workspace --target ${{ matrix.target }}
 
   browser:
     name: browser (${{ matrix.browser }})
@@ -105,7 +105,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: taiki-e/install-action@wasm-pack
       - name: Test suite in a headless browser
-        run: wasm-pack test --headless --${{ matrix.browser }} ${{ matrix.driver }} -- --features browser
+        run: wasm-pack test --headless --${{ matrix.browser }} ${{ matrix.driver }} crates/spooly --features browser
         env:
           # Run every test in the browser, not in Node.
           WASM_BINDGEN_USE_BROWSER: "1"
@@ -117,7 +117,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
-      - run: cargo miri test
+      - run: cargo miri test --workspace
         env:
           # Threads + `thread::sleep` in tests/remote.rs need real time.
           MIRIFLAGS: -Zmiri-disable-isolation

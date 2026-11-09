@@ -5,10 +5,10 @@
 //! `wasm-bindgen` crate in `Cargo.lock`):
 //!
 //! ```text
-//! cargo build --release --example browser --target wasm32-unknown-unknown --features browser
-//! wasm-bindgen --target web --out-dir examples/browser/pkg \
+//! cargo build --release -p spooly --example browser --target wasm32-unknown-unknown --features browser
+//! wasm-bindgen --target web --out-dir crates/spooly/examples/browser/pkg \
 //!     target/wasm32-unknown-unknown/release/examples/browser.wasm
-//! python3 -m http.server -d examples/browser
+//! python3 -m http.server -d crates/spooly/examples/browser
 //! ```
 //!
 //! Then open <http://localhost:8000>.

@@ -75,19 +75,24 @@ spooly::browser::start(async {
 });
 ```
 
-[`examples/browser`](examples/browser) is a small page: a clock on an
+[`crates/spooly/examples/browser`](crates/spooly/examples/browser) is a small page: a clock on an
 interval, the event loop's ordering, and a task woken by button clicks.
 Build it with the `wasm-bindgen` CLI (the same version as the crate in
 `Cargo.lock`) and serve the folder:
 
 ```sh
-cargo build --release --example browser --target wasm32-unknown-unknown --features browser
-wasm-bindgen --target web --out-dir examples/browser/pkg \
+cargo build --release -p spooly --example browser --target wasm32-unknown-unknown --features browser
+wasm-bindgen --target web --out-dir crates/spooly/examples/browser/pkg \
     target/wasm32-unknown-unknown/release/examples/browser.wasm
-python3 -m http.server -d examples/browser   # then open http://localhost:8000
+python3 -m http.server -d crates/spooly/examples/browser   # then open http://localhost:8000
 ```
 
 ## Development
+
+The repository is a Cargo workspace. The core runtime is
+[`crates/spooly`](crates/spooly); async I/O (planned, see
+[`docs/ASYNC_IO_PLAN.md`](docs/ASYNC_IO_PLAN.md)) will be a separate crate
+next to it. Commands run from the repository root:
 
 ```sh
 cargo test
@@ -95,26 +100,26 @@ cargo clippy --all-targets -- -D warnings
 cargo +nightly miri test   # needs: rustup +nightly component add miri
 ```
 
-`tests/model.rs` is the oracle: it generates random programs (microtasks,
+`crates/spooly/tests/model.rs` is the oracle: it generates random programs (microtasks,
 timers, intervals, cancellation, slow callbacks, tasks, aborts, panics), runs
 each on Spooly and on a small reference simulator of the design, and requires
 identical traces.
 
-`tests/node_parity.rs` also runs a handful of scenarios as JS in Node, as an
+`crates/spooly/tests/node_parity.rs` also runs a handful of scenarios as JS in Node, as an
 optional sanity check that Spooly still behaves like a JS event loop. It needs
 `node` on `PATH`:
 
 ```sh
-SPOOLY_COMPARE_NODE=1 cargo test --test node_parity
+SPOOLY_COMPARE_NODE=1 cargo test -p spooly --test node_parity
 ```
 
 The suite also runs in a headless browser, except for the tests that need
-threads or catch panics (WASM aborts on a panic), plus `tests/browser.rs`
+threads or catch panics (WASM aborts on a panic), plus `crates/spooly/tests/browser.rs`
 for the browser driver. It needs [`wasm-pack`](https://github.com/drager/wasm-pack)
 and Chrome or Firefox:
 
 ```sh
-WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --headless --firefox -- --features browser
+WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --headless --firefox crates/spooly --features browser
 ```
 
 Stress tests (a million tasks, 100k timers with random cancellation, very
@@ -122,7 +127,7 @@ long microtask and join chains, heavy cross-thread waking) are `#[ignore]`d;
 CI runs them weekly:
 
 ```sh
-cargo test --release --test stress -- --ignored
+cargo test --release -p spooly --test stress -- --ignored
 ```
 
 Benchmarks use a small built-in harness (no benchmark framework); the v1

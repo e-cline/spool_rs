@@ -4,7 +4,7 @@
 > expands §9.1 and §9.2 of [`INITIAL_PLAN.md`](INITIAL_PLAN.md) into a
 > design and milestones. Decisions are tagged `IO#` so they don't collide
 > with the core plan's `D#` numbers. v2 settles draft v1's open questions
-> (§11); they stay open to revisiting.
+> (§11); they stay open to revisiting. M11 (the workspace) is done.
 
 Spooly runs tasks and timers today, but a task can only wait on another
 task, a timer, or a wake from another thread. This plan adds **network I/O**
@@ -605,12 +605,12 @@ to, and the "revisit if" column says what would prompt that.
 These continue the core plan's numbering. M10 (WASI driver) stays deferred
 and is only a prerequisite for M16.
 
-| # | Milestone | Contents |
-|---|---|---|
-| M11 | Workspace | Move the crate to `crates/spooly`; root `[workspace]` with shared package fields, lints and dependencies; CI with `--workspace`. No code change; every test passes unchanged. |
-| M12 | Core hook | `spooly::driver::IoDriver`, `Builder::io_driver`, `current_io_driver`; the unparker in `Shared`; the I/O phase and `is_active` in `step()` (IO2, IO3); native driver waits through the driver and handles `MockClock` (IO4). Tested with a fake in-crate driver (scripted readiness, a counting unparker): phase order, timers-plus-I/O fairness, liveness, remote wakes interrupting `wait`. No behavior change without a driver; model and browser suites unchanged. |
-| M13 | `spooly-io` net | The crate, `mio` reactor (IO1, §5.3), `Driver`, `run`/`block_on`, TCP/UDP/Unix, `futures-io` traits, `split`, `readable`/`writable`, `unref`. Loopback tests on all three OSes; liveness and stall tests; drop and cancellation tests; an echo-server example. |
-| M14 | Blocking + fs | The pool, `spawn_blocking` (IO7), `lookup_host` and string-address `connect`, `spooly_io::fs` (free functions, then `File`). Tests in temp dirs, pool shutdown and idle exit, panic propagation. |
-| M15 | Extras | `test::{duplex, pipe}`; `Async<T>`; `socket2` feature; I/O operations in the reference model through `duplex` (optional). |
-| M16 | WASI 0.2 | After M10: the pollable backend (§8.2), `wasi:sockets`, inline `fs`; the `spooly-io` suite (minus threads) under wasmtime in CI. |
-| — | Later | `io_uring`, processes, signals, stdio, a web-streams adapter crate (§8.3, §10). |
+| # | Milestone | Status | Contents |
+|---|---|---|---|
+| M11 | Workspace | done | Move the crate to `crates/spooly`; root `[workspace]` with shared package fields, lints and dependencies; CI with `--workspace`. No code change; every test passes unchanged. |
+| M12 | Core hook | | `spooly::driver::IoDriver`, `Builder::io_driver`, `current_io_driver`; the unparker in `Shared`; the I/O phase and `is_active` in `step()` (IO2, IO3); native driver waits through the driver and handles `MockClock` (IO4). Tested with a fake in-crate driver (scripted readiness, a counting unparker): phase order, timers-plus-I/O fairness, liveness, remote wakes interrupting `wait`. No behavior change without a driver; model and browser suites unchanged. |
+| M13 | `spooly-io` net | | The crate, `mio` reactor (IO1, §5.3), `Driver`, `run`/`block_on`, TCP/UDP/Unix, `futures-io` traits, `split`, `readable`/`writable`, `unref`. Loopback tests on all three OSes; liveness and stall tests; drop and cancellation tests; an echo-server example. |
+| M14 | Blocking + fs | | The pool, `spawn_blocking` (IO7), `lookup_host` and string-address `connect`, `spooly_io::fs` (free functions, then `File`). Tests in temp dirs, pool shutdown and idle exit, panic propagation. |
+| M15 | Extras | | `test::{duplex, pipe}`; `Async<T>`; `socket2` feature; I/O operations in the reference model through `duplex` (optional). |
+| M16 | WASI 0.2 | | After M10: the pollable backend (§8.2), `wasi:sockets`, inline `fs`; the `spooly-io` suite (minus threads) under wasmtime in CI. |
+| — | Later | | `io_uring`, processes, signals, stdio, a web-streams adapter crate (§8.3, §10). |

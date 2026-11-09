@@ -397,8 +397,13 @@ way out is `sleep(Duration::ZERO).await`, which yields to the timers phase.
 
 ### 4.1 Crate layout
 
+*(Since M11 the repository is a Cargo workspace, and this crate lives in
+`crates/spooly/`; the root `Cargo.toml` holds the shared package fields,
+lints, and dependency versions. See §9 of
+[`ASYNC_IO_PLAN.md`](ASYNC_IO_PLAN.md).)*
+
 ```
-spooly/
+crates/spooly/
 ├── Cargo.toml          # edition 2024; minimal dependencies
 ├── src/
 │   ├── lib.rs          # public re-exports + free functions

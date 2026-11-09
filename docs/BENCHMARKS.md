@@ -1,6 +1,6 @@
 # Benchmarks
 
-`benches/throughput.rs` measures the hot paths: spawning, waking, the
+`crates/spooly/benches/throughput.rs` measures the hot paths: spawning, waking, the
 microtask queue, and timers. It uses a small built-in harness rather than a
 benchmark framework: each benchmark runs a batch of operations 11 times and
 reports the median and best time per operation.
