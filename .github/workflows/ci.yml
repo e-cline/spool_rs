@@ -31,13 +31,6 @@ jobs:
           # The trybuild .stderr files include std source snippets, which
           # rustc only prints when rust-src is installed.
           components: rust-src
-      # TEMPORARY (drop before merging): show why these fail on Windows.
-      - name: Diagnose Windows connect failures
-        if: runner.os == 'Windows'
-        continue-on-error: true
-        run: |
-          cargo test -p spooly-io --test tcp -- --no-capture --test-threads=1 connecting_to_a_closed_port_fails
-          cargo test -p spooly-io --test tcp -- --no-capture --test-threads=1 connect_resolves_a_host_name
       - run: cargo test --workspace --all-targets
         env:
           # Beta's diagnostics differ from the stable wording the trybuild
