@@ -27,6 +27,11 @@
 //! Like any [`spawn_blocking`](spooly::spawn_blocking) job, an operation
 //! whose future is dropped still runs to completion, and
 //! [`run`](crate::run) waits for it.
+//!
+//! On WASI, which has no threads and no pool, each operation runs inline
+//! instead, through `wasi:filesystem`: the loop waits while it runs, and its
+//! future is ready at once. Paths must be inside a directory the host
+//! preopened (`wasmtime run --dir`). See the [crate docs](crate#on-wasi).
 
 mod file;
 
@@ -40,16 +45,16 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use spooly::BlockingHandle;
+use crate::blocking::{self, Job};
 
 pub use file::{File, OpenOptions};
 pub use std::fs::{FileType, Metadata, Permissions};
 
-/// Runs `f` on the blocking pool.
+/// Runs `f` on the blocking pool (inline on WASI).
 async fn asyncify<T: Send + 'static>(
     f: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
-    spooly::spawn_blocking(f).await
+    blocking::spawn(f).await
 }
 
 /// Reads the whole file at `path`; as [`std::fs::read`].
@@ -200,7 +205,7 @@ type Batch = (
 );
 
 /// The entries of a directory, from [`read_dir`]. Entries are fetched from
-/// the OS in batches, on the blocking pool.
+/// the OS in batches, on the blocking pool (inline on WASI).
 pub struct ReadDir {
     buf: VecDeque<io::Result<std::fs::DirEntry>>,
     state: ReadDirState,
@@ -209,7 +214,7 @@ pub struct ReadDir {
 enum ReadDirState {
     /// `None` once the OS has no more entries.
     Idle(Option<std::fs::ReadDir>),
-    Busy(BlockingHandle<Batch>),
+    Busy(Job<Batch>),
 }
 
 impl ReadDir {
@@ -230,7 +235,7 @@ impl ReadDir {
                 ReadDirState::Idle(None) => return Poll::Ready(Ok(None)),
                 ReadDirState::Idle(inner) => {
                     let mut inner = inner.take().expect("checked above");
-                    self.state = ReadDirState::Busy(spooly::spawn_blocking(move || {
+                    self.state = ReadDirState::Busy(blocking::spawn(move || {
                         let mut batch = VecDeque::with_capacity(READ_DIR_BATCH);
                         for _ in 0..READ_DIR_BATCH {
                             match inner.next() {

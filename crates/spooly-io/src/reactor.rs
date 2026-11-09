@@ -61,7 +61,26 @@ pub struct Driver {
     /// stale event for a closed socket finds nothing.
     sources: RefCell<HashMap<usize, Rc<ScheduledIo>>>,
     next_token: Cell<usize>,
-    waker: Arc<mio::Waker>,
+    /// Ends a `wait` early (see [`new_unparker`]).
+    unparker: Arc<dyn Fn() + Send + Sync>,
+}
+
+/// Wakes a `wait` from another thread, through a `mio::Waker`.
+#[cfg(not(target_os = "wasi"))]
+fn new_unparker(registry: &Registry) -> io::Result<Arc<dyn Fn() + Send + Sync>> {
+    let waker = mio::Waker::new(registry, WAKER)?;
+    Ok(Arc::new(move || {
+        // Fails only if the OS does; the wait then just ends at its
+        // timeout, as with a lost thread unpark.
+        let _ = waker.wake();
+    }))
+}
+
+/// WASI has no threads (and `mio` no `Waker` there): nothing can run while
+/// the driver waits, so nothing could call this then.
+#[cfg(target_os = "wasi")]
+fn new_unparker(_registry: &Registry) -> io::Result<Arc<dyn Fn() + Send + Sync>> {
+    Ok(Arc::new(|| {}))
 }
 
 impl Driver {
@@ -74,7 +93,7 @@ impl Driver {
     pub fn new() -> io::Result<Driver> {
         let poll = mio::Poll::new()?;
         let registry = poll.registry().try_clone()?;
-        let waker = Arc::new(mio::Waker::new(&registry, WAKER)?);
+        let unparker = new_unparker(&registry)?;
         Ok(Driver {
             poll: RefCell::new(poll),
             registry,
@@ -82,7 +101,7 @@ impl Driver {
             pending: Cell::new(false),
             sources: RefCell::new(HashMap::new()),
             next_token: Cell::new(0),
-            waker,
+            unparker,
         })
     }
 
@@ -165,12 +184,7 @@ impl IoDriver for Driver {
     }
 
     fn unparker(&self) -> Arc<dyn Fn() + Send + Sync> {
-        let waker = Arc::clone(&self.waker);
-        Arc::new(move || {
-            // Fails only if the OS does; the wait then just ends at its
-            // timeout, as with a lost thread unpark.
-            let _ = waker.wake();
-        })
+        Arc::clone(&self.unparker)
     }
 
     fn is_active(&self) -> bool {

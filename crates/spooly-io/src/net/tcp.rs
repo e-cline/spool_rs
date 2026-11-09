@@ -213,6 +213,8 @@ impl TcpStream {
     }
 
     /// Reads data without removing it from the queue.
+    ///
+    /// Not supported on WASI: it fails with an error there.
     pub async fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
         poll_fn(|cx| self.io.poll_io(cx, Direction::Read, |s| s.peek(buf))).await
     }

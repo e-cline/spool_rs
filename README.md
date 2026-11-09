@@ -51,8 +51,9 @@ semantics.
 > M11 (a Cargo workspace), M12 (an I/O driver hook in the core), M13
 > ([`crates/spooly-io`](crates/spooly-io): TCP, UDP and Unix sockets), and
 > M14 (`spooly::spawn_blocking`, a thread pool in the core; `spooly_io::fs`
-> and DNS on it), and M15 (in-memory test streams, `Async<T>` for any
-> file descriptor) are done. Next: M16, WASI 0.2 I/O.
+> and DNS on it), M15 (in-memory test streams, `Async<T>` for any file
+> descriptor), and M16 (WASI 0.2: sockets, `fs` and DNS on `wasm32-wasip2`,
+> through the same `mio` reactor) are done.
 
 The crate docs (`cargo doc --open`) are the guide: the closest JS
 counterparts, the event loop, cancellation, panics, threads, and testing

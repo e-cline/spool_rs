@@ -14,8 +14,8 @@ publish = false
 futures-io.workspace = true
 spooly.workspace = true
 
-# The reactor (IO1). Other targets get no backend yet (IO8).
-[target.'cfg(any(unix, windows))'.dependencies]
+# The reactor (IO1), on WASI 0.2 too (IO15). The browser has none (IO8).
+[target.'cfg(any(unix, windows, all(target_os = "wasi", target_env = "p2")))'.dependencies]
 mio = { workspace = true, features = ["os-poll", "net"] }
 
 # `SourceFd`, for `Async<T>` (Unix only).

@@ -31,8 +31,8 @@
 //! [`ToSocketAddrs`] (IP addresses, `"host:port"` strings, `(host, port)`
 //! pairs, ...) and try each address it resolves to in turn. A host name is
 //! resolved on the runtime's blocking pool ([`spooly::spawn_blocking`]), so
-//! it doesn't block the runtime's thread; [`lookup_host`] resolves one
-//! directly.
+//! it doesn't block the runtime's thread (except on WASI: see the
+//! [crate docs](crate#on-wasi)); [`lookup_host`] resolves one directly.
 
 mod addr;
 mod split;
@@ -75,14 +75,14 @@ async fn each_addr<T>(
 /// `socket2::SockRef::from(&socket)`.
 macro_rules! impl_as_handle {
     ($($ty:ty),*) => {$(
-        #[cfg(unix)]
+        #[cfg(any(unix, target_os = "wasi"))]
         impl std::os::fd::AsFd for $ty {
             fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
                 std::os::fd::AsFd::as_fd(self.io.get_ref())
             }
         }
 
-        #[cfg(unix)]
+        #[cfg(any(unix, target_os = "wasi"))]
         impl std::os::fd::AsRawFd for $ty {
             fn as_raw_fd(&self) -> std::os::fd::RawFd {
                 std::os::fd::AsRawFd::as_raw_fd(self.io.get_ref())

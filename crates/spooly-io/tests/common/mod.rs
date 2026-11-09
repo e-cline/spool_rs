@@ -17,6 +17,10 @@ use spooly_io::net::{TcpListener, TcpStream};
 pub struct Watchdog(Option<mpsc::Sender<()>>);
 
 pub fn watchdog(name: &'static str) -> Watchdog {
+    // No threads on WASM: no watchdog (CI's job timeout still applies).
+    if cfg!(target_family = "wasm") {
+        return Watchdog(None);
+    }
     let (tx, rx) = mpsc::channel::<()>();
     thread::spawn(move || {
         if let Err(mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(Duration::from_secs(30)) {

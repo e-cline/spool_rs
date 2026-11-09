@@ -800,7 +800,9 @@ that coverage into the model, and removed the Node fuzzer.)*
   `wasm32-wasip2`, instead of `wasm32-wasip1`.
 - From M10: clippy and the core's suite (`--lib --tests`) on `wasm32-wasip2`
   under wasmtime, which `.cargo/config.toml` sets as that target's runner,
-  so `cargo test --target wasm32-wasip2` works locally too.
+  so `cargo test --target wasm32-wasip2` works locally too. From M16, the
+  whole workspace, with the runner granting loopback networking, host-name
+  lookups and `/tmp` (`ASYNC_IO_PLAN.md` §8.2).
 - From M9: the suite with `--features browser` under `wasm-pack test
   --headless`, in Chrome and Firefox (with the runner's preinstalled
   drivers, which match its browsers), and clippy and docs for that target,
@@ -975,5 +977,5 @@ shares.
 | M8 | Non-blocking core | done | Split `drive()` into `step()` (D5) and a native driver; make main a resumable task; per-target default clock (D13); `cargo check` for `wasm32-unknown-unknown` and `wasm32-wasip1` in CI. Settle the public-`step()` question (§10). No behavior change on native: the full suite must pass unchanged. |
 | M9 | Browser | done | Feature `browser`: `PerformanceClock`, the host-callback driver (D14), `browser::start`, an example page, and the suite (minus threads and panics) under `wasm-bindgen-test` in a headless browser in CI. |
 | M10 | WASI 0.2 | done | The suite (minus threads, panics, and the native-only files of §8.1) passes under wasmtime on `wasm32-wasip2`, in CI; `wasm32-wasip1` is dropped from CI and the plan (§11.4). The native driver works there except for waiting (`thread::park` is a no-op), so it became the parking driver of every target, waiting through the new `platform` layer, which also holds the default clocks; the blocking pool gets a no-threads stand-in (D16). Waiting for a wake that can't come panics on WASI. Not done: the reference model on WASI (it generates panics, which abort there), and `io_driver.rs` there (its fake reactor needs a thread; M16's WASI backend will test that path for real). |
-| M11–M16 | Async I/O | | Numbers taken by [`ASYNC_IO_PLAN.md`](ASYNC_IO_PLAN.md) §12: M11–M15 done, M16 (WASI 0.2 I/O) next. |
+| M11–M16 | Async I/O | | Numbers taken by [`ASYNC_IO_PLAN.md`](ASYNC_IO_PLAN.md) §12: M11–M16 done (M16: WASI 0.2 I/O, on the same `mio` reactor). |
 | M17 | Performance | | §9.6, measured against `BENCHMARKS.md`. Renumbered from M11, whose number the async I/O plan took. |

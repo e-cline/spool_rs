@@ -18,6 +18,7 @@ use spooly_io::net::{TcpListener, TcpStream};
 /// A detached server task waiting on `accept` keeps `run` alive until a
 /// client (on another thread) connects.
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "needs threads")]
 fn a_detached_server_keeps_run_alive() -> io::Result<()> {
     let _w = watchdog("a_detached_server_keeps_run_alive");
     let got = Rc::new(Cell::new(0u8));
@@ -108,6 +109,7 @@ fn dropping_a_socket_with_a_cancelled_wait_lets_run_exit() -> io::Result<()> {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "needs threads")]
 fn a_wake_from_another_thread_interrupts_the_wait() -> io::Result<()> {
     let _w = watchdog("a_wake_from_another_thread_interrupts_the_wait");
     spooly_io::block_on(async {

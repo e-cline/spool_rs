@@ -26,6 +26,10 @@ fn shared_references_read_and_write() -> io::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "wasi",
+    ignore = "WASI's `writev` sends only the first buffer"
+)]
 fn vectored_reads_and_writes() -> io::Result<()> {
     let _w = watchdog("vectored_reads_and_writes");
     spooly_io::block_on(async {

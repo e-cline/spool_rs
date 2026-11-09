@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
 use futures_io::{AsyncRead, AsyncSeek, AsyncWrite};
-use spooly::BlockingHandle;
 
 use super::{Metadata, Permissions, asyncify};
+use crate::blocking::{self, Job};
 
 /// The most a single read or write moves between the task and the pool
 /// thread.
@@ -68,7 +68,7 @@ pub struct File {
 enum State {
     Idle(Buf),
     /// An operation on the pool. It owns the buffer until it is done.
-    Busy(BlockingHandle<(Op, Buf)>),
+    Busy(Job<(Op, Buf)>),
 }
 
 /// The result of the operation in flight.
@@ -249,7 +249,7 @@ impl File {
         op: impl FnOnce(&std::fs::File, Buf) -> (Op, Buf) + Send + 'static,
     ) {
         let std = Arc::clone(&self.std);
-        self.state = State::Busy(spooly::spawn_blocking(move || op(&std, buf)));
+        self.state = State::Busy(blocking::spawn(move || op(&std, buf)));
     }
 
     /// Polls the operation in flight, if any, and puts its buffer back.

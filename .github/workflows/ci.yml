@@ -101,14 +101,14 @@ jobs:
           components: clippy
           targets: wasm32-wasip2
       - uses: bytecodealliance/actions/wasmtime/setup@v1
-      - run: cargo clippy -p spooly --all-targets --target wasm32-wasip2
-      # The core's suite under wasmtime (the runner is set in
-      # .cargo/config.toml); tests that need threads or catch panics are
+      - run: cargo clippy --workspace --all-targets --target wasm32-wasip2
+      # Both crates' suites under wasmtime, with loopback networking and a
+      # preopened /tmp (the runner is set in .cargo/config.toml). Tests that
+      # need threads, catch panics, or use socket features WASI lacks are
       # ignored there. Not the doctests: they are merged into one binary,
       # which the first one using a thread aborts, and they run natively.
-      # spooly-io's tests need sockets: M16.
-      - name: Test suite under wasmtime
-        run: cargo test -p spooly --target wasm32-wasip2 --lib --tests
+      - name: Test suites under wasmtime
+        run: cargo test --workspace --target wasm32-wasip2 --lib --tests
 
   browser:
     name: browser (${{ matrix.browser }})

@@ -29,6 +29,7 @@ fn send_to_and_recv_from() -> io::Result<()> {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no `MSG_PEEK`")]
 fn connected_send_and_recv() -> io::Result<()> {
     let _w = watchdog("connected_send_and_recv");
     spooly_io::block_on(async {
@@ -79,6 +80,7 @@ fn many_datagrams_in_order() -> io::Result<()> {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no `SO_BROADCAST`")]
 fn std_conversions_and_options() -> io::Result<()> {
     let _w = watchdog("udp std_conversions_and_options");
     let std_socket = std::net::UdpSocket::bind("127.0.0.1:0")?;

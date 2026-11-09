@@ -9,7 +9,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV
 ///
 /// Like [`std::net::ToSocketAddrs`], but a host name is resolved on the
 /// runtime's blocking pool ([`spooly::spawn_blocking`]), not on the
-/// runtime's thread. An IP address (`"127.0.0.1:80"`, `("::1", 80)`) needs
+/// runtime's thread (on WASI, which has no threads, it is resolved inline).
+/// An IP address (`"127.0.0.1:80"`, `("::1", 80)`) needs
 /// no lookup.
 ///
 /// This trait is sealed: it can't be implemented outside this crate.
@@ -108,12 +109,13 @@ impl<T: ToSocketAddrs + Copy> Sealed for &T {
 }
 
 /// Resolves `addr` to one or more addresses: at once for IP addresses, and
-/// on the blocking pool for a host name. An empty result is an error.
+/// on the blocking pool (inline on WASI) for a host name. An empty result is
+/// an error.
 pub(super) async fn resolve(addr: impl ToSocketAddrs) -> io::Result<Vec<SocketAddr>> {
     let addrs = match addr.to_addrs() {
         Addrs::Ready(addrs) => addrs,
         Addrs::Lookup(name) => {
-            spooly::spawn_blocking(move || {
+            crate::blocking::spawn(move || {
                 std::net::ToSocketAddrs::to_socket_addrs(&name).map(Iterator::collect)
             })
             .await?
@@ -134,7 +136,9 @@ pub(super) async fn resolve(addr: impl ToSocketAddrs) -> io::Result<Vec<SocketAd
 ///
 /// A host name is resolved by the OS (as `std` does), on the runtime's
 /// blocking pool, so the runtime's thread keeps running tasks meanwhile.
-/// This needs a Spooly runtime, but not a [`Driver`](crate::Driver).
+/// On WASI, which has no threads, the lookup runs inline and the loop
+/// waits for it. This needs a Spooly runtime, but not a
+/// [`Driver`](crate::Driver).
 ///
 /// ```
 /// spooly::block_on(async {
