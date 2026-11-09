@@ -327,6 +327,11 @@ impl<S: Source> PollEvented<S> {
         self.source.as_ref().expect("registered source")
     }
 
+    #[cfg(unix)]
+    pub(crate) fn get_mut(&mut self) -> &mut S {
+        self.source.as_mut().expect("registered source")
+    }
+
     /// Deregisters the source and returns it.
     pub(crate) fn into_inner(mut self) -> S {
         let mut source = self.source.take().expect("registered source");
@@ -349,6 +354,32 @@ impl<S: Source> PollEvented<S> {
                 return Poll::Pending;
             }
             match op(self.get_ref()) {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => io.clear_ready(dir),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                result => {
+                    io.clear_waker(dir);
+                    return Poll::Ready(result);
+                }
+            }
+        }
+    }
+
+    /// [`poll_io`](Self::poll_io), for an `op` that needs `&mut S`.
+    #[cfg(unix)]
+    pub(crate) fn poll_io_mut<R>(
+        &mut self,
+        cx: &mut Context<'_>,
+        dir: Direction,
+        mut op: impl FnMut(&mut S) -> io::Result<R>,
+    ) -> Poll<io::Result<R>> {
+        let io = &self.registration.io;
+        let source = self.source.as_mut().expect("registered source");
+        loop {
+            if !io.is_ready(dir) {
+                io.set_waker(dir, cx.waker());
+                return Poll::Pending;
+            }
+            match op(source) {
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => io.clear_ready(dir),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 result => {

@@ -51,8 +51,9 @@ semantics.
 > M11 (a Cargo workspace), M12 (an I/O driver hook in the core), M13
 > ([`crates/spooly-io`](crates/spooly-io): TCP, UDP and Unix sockets), and
 > M14 (`spooly::spawn_blocking`, a thread pool in the core; `spooly_io::fs`
-> and DNS on it) are done. Next: M15, extras (in-memory test streams,
-> `Async<T>`).
+> and DNS on it), and M15 (in-memory test streams, `Async<T>` for any
+> file descriptor) are done. Next: M16, WASI 0.2 I/O, after the core's
+> WASI driver (M10).
 
 The crate docs (`cargo doc --open`) are the guide: the closest JS
 counterparts, the event loop, cancellation, panics, threads, and testing
@@ -68,6 +69,8 @@ cargo run --example cancellation   # timeouts, abort, abort_on_drop, cancelling 
 cargo run --example panics         # errors as `Result`s, try_join on abort, a panic stopping the loop
 cargo run --example threads        # waking `!Send` tasks from worker threads, KeepAlive
 cargo run -p spooly-io --example echo   # an echo server and clients on one thread
+cargo run -p spooly-io --example copy   # a file copy on the blocking pool, with a ticker running meanwhile
+cargo run -p spooly-io --example scan   # a concurrent TCP port scan with timeouts
 ```
 
 ## In the browser

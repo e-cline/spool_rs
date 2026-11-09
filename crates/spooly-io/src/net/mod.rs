@@ -69,6 +69,43 @@ async fn each_addr<T>(
     Err(last.expect("at least one address"))
 }
 
+/// The OS-handle traits (`AsFd` / `AsRawFd`, or `AsSocket` /
+/// `AsRawSocket`) for a socket type with a `PollEvented` field `io`. They
+/// let other crates set options the type has no method for, such as
+/// `socket2::SockRef::from(&socket)`.
+macro_rules! impl_as_handle {
+    ($($ty:ty),*) => {$(
+        #[cfg(unix)]
+        impl std::os::fd::AsFd for $ty {
+            fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+                std::os::fd::AsFd::as_fd(self.io.get_ref())
+            }
+        }
+
+        #[cfg(unix)]
+        impl std::os::fd::AsRawFd for $ty {
+            fn as_raw_fd(&self) -> std::os::fd::RawFd {
+                std::os::fd::AsRawFd::as_raw_fd(self.io.get_ref())
+            }
+        }
+
+        #[cfg(windows)]
+        impl std::os::windows::io::AsSocket for $ty {
+            fn as_socket(&self) -> std::os::windows::io::BorrowedSocket<'_> {
+                std::os::windows::io::AsSocket::as_socket(self.io.get_ref())
+            }
+        }
+
+        #[cfg(windows)]
+        impl std::os::windows::io::AsRawSocket for $ty {
+            fn as_raw_socket(&self) -> std::os::windows::io::RawSocket {
+                std::os::windows::io::AsRawSocket::as_raw_socket(self.io.get_ref())
+            }
+        }
+    )*};
+}
+pub(crate) use impl_as_handle;
+
 /// `AsyncRead` and `AsyncWrite` for a stream type and for a reference to it.
 /// The type has a `PollEvented` field `io`, and a `shutdown` method.
 macro_rules! impl_async_stream {

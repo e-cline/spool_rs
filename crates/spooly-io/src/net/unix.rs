@@ -11,8 +11,8 @@ use std::task::{Context, Poll};
 
 use mio::Interest;
 
-use super::impl_async_stream;
 use super::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
+use super::{impl_as_handle, impl_async_stream};
 use crate::reactor::{Direction, PollEvented};
 
 /// A Unix-domain socket listening for connections.
@@ -218,6 +218,7 @@ impl UnixStream {
 }
 
 impl_async_stream!(UnixStream);
+impl_as_handle!(UnixListener, UnixStream, UnixDatagram);
 
 impl fmt::Debug for UnixStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

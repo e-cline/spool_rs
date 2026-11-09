@@ -501,16 +501,42 @@ register any non-blocking fd/socket with the reactor and get
 Write`. Modeled on smol's `async-io`. It covers pipes, `eventfd`,
 third-party sockets and so on. (Later milestone, M15.)
 
+*As built (M15):*
+
+- **Unix only (IO20).** `mio` registers an arbitrary descriptor on Unix
+  (`SourceFd`, its `os-ext` feature), but on Windows only its own socket
+  types: smol supports Windows here through `polling`, a different
+  reactor. Third-party sockets on Windows convert to `std::net` types and
+  use `from_std`.
+- **The caller makes the descriptor non-blocking (IO22).** Setting
+  `O_NONBLOCK` on an arbitrary `AsFd` needs `fcntl`, so `unsafe` code
+  (forbidden in the workspace) or a new dependency (`rustix`); `Async::new`
+  documents the requirement instead. A blocking descriptor blocks the
+  runtime's thread, but is not unsound.
+- API: `new`, `get_ref` / `get_mut` / `into_inner`, `readable` /
+  `writable` (and `poll_` forms), `read_with` / `write_with` (and `_mut`
+  forms for `&mut T`), `unref`; `AsyncRead` / `AsyncWrite` for `Async<T>`
+  when `T: Read` / `Write`, and for `&Async<T>` when `&T` is; `AsFd`.
+  `Async<T>` is `Unpin` for every `T` (nothing in it is pinned).
+
 ### 7.4 Features of `spooly-io`
 
 | Feature | Default | Contents |
 |---|---|---|
 | `net` | yes | TCP, UDP, Unix sockets, `lookup_host` |
 | `fs` | yes | `spooly_io::fs` |
+| ~~`socket2`~~ | — | Dropped in M15 (IO21): see below |
 
 (`spawn_blocking` and the pool are in the core since M14, IO17. None of
 these features exist yet: everything is always built.)
-| `socket2` | no | `from_socket2` / extra options |
+
+*As built (M15):* instead of a `socket2` feature, every socket type
+implements the standard OS-handle traits (`AsFd` + `AsRawFd` on Unix,
+`AsSocket` + `AsRawSocket` on Windows). Then `socket2::SockRef::from(&s)`
+sets any option, with no dependency of ours, and a socket configured
+before use (options before `bind`, say) is built with `socket2` and handed
+over through `from_std`. `tests/socket2.rs` does both. (A `TcpSocket`-like
+builder for options before an *async* `connect` is left for later.)
 
 ### 7.5 Testing utilities
 
@@ -519,6 +545,15 @@ implement the same traits, with a configurable buffer size. They involve no
 reactor and no OS: a write wakes the reader as an ordinary local wake. They
 give deterministic tests of protocol code (with `MockClock`), and let the
 reference model (D15) grow I/O-like operations later without real sockets.
+
+*As built (M15):* `pipe(capacity) -> (PipeWriter, PipeReader)` and
+`duplex(capacity) -> (DuplexStream, DuplexStream)`, a duplex being two
+pipes (`into_split` gives its halves). Closing a writer ends the stream
+for its reader (which can still write back on a duplex); dropping a reader
+makes writes fail with `BrokenPipe`. A zero capacity panics. The module is
+built on every target, WASM included, and needs no `Driver`. The
+reference-model operations were not done (optional); they remain possible
+later.
 
 ---
 
@@ -698,6 +733,9 @@ to, and the "revisit if" column says what would prompt that.
 | IO17 | `spawn_blocking` in the core or in `spooly-io`? | **The core** (`spooly::spawn_blocking`): it needs only `KeepAlive` and remote wakes, and `std` (§6.1). Decided in M14 | The pool needs something I/O-specific, or its threads become a burden for core-only users |
 | IO18 | One pool per process, or per runtime? | **Per runtime**, created on first use: the `Builder` configures it, it shuts down with its runtime, and tests stay isolated (Tokio's pool is per runtime too) | Many short-lived runtimes each start threads that a shared pool would reuse |
 | IO19 | Does a `MockClock` jump while a blocking job runs? | **No**: the loop waits for the job in real time first, as Tokio's paused time does (§6) | A test needs time to pass during a job that never ends (a server loop on the pool) |
+| IO20 | `Async<T>` on Windows? | **Unix only**: `mio` can't register an arbitrary Windows socket (§7.3) | Users need it on Windows (then: `polling` as a second backend, or `mio` support) |
+| IO21 | A `socket2` feature? | **No**: the socket types implement `AsFd`/`AsSocket`, so `socket2::SockRef` works with no dependency of ours (§7.4) | Options must be set between creating a socket and an async `connect` (a `TcpSocket` builder) |
+| IO22 | Does `Async::new` make the descriptor non-blocking? | **No**: the caller does (it needs `unsafe` or `rustix`) (§7.3) | It proves a common mistake; `rustix` is then a small, safe dependency |
 
 ---
 
@@ -712,6 +750,6 @@ and is only a prerequisite for M16.
 | M12 | Core hook | done | `spooly::driver::IoDriver`, `Builder::io_driver`, `current_io_driver`; the unparker in `Shared`; the I/O phase and `is_active` in `step()` (IO2, IO3); native driver waits through the driver and handles `MockClock` (IO4). Tested with a fake in-crate driver (scripted readiness, a counting unparker): phase order, timers-plus-I/O fairness, liveness, remote wakes interrupting `wait`. No behavior change without a driver; model and browser suites unchanged. |
 | M13 | `spooly-io` net | done | The crate, `mio` reactor (IO1, §5.3), `Driver`, `run`/`block_on`, TCP/UDP/Unix, `futures-io` traits, `halves`/`into_split`, `readable`/`writable`, `unref`. Loopback tests on all three OSes; liveness and stall tests; drop and cancellation tests; an echo-server example. |
 | M14 | Blocking + fs | done | The pool and `spooly::spawn_blocking` in the core (IO7, IO17–IO19), `lookup_host` and string-address `connect`, `spooly_io::fs` (free functions, then `File`). Tests in temp dirs, pool shutdown and idle exit, panic propagation; the pool's tests run under Miri. |
-| M15 | Extras | | `test::{duplex, pipe}`; `Async<T>`; `socket2` feature; I/O operations in the reference model through `duplex` (optional). |
+| M15 | Extras | done | `test::{duplex, pipe}`; `Async<T>` (Unix, IO20, IO22); the OS-handle traits on every socket instead of a `socket2` feature (IO21); `copy` and `scan` examples. Not done: I/O operations in the reference model through `duplex` (optional). |
 | M16 | WASI 0.2 | | After M10: the pollable backend (§8.2), `wasi:sockets`, inline `fs`; the `spooly-io` suite (minus threads) under wasmtime in CI. |
 | — | Later | | `io_uring`, processes, signals, stdio, a web-streams adapter crate (§8.3, §10). |

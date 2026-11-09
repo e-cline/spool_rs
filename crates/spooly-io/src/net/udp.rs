@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 
 use mio::Interest;
 
-use super::{ToSocketAddrs, each_addr, resolve};
+use super::{ToSocketAddrs, each_addr, impl_as_handle, resolve};
 use crate::reactor::{Direction, PollEvented};
 
 /// A UDP socket.
@@ -150,3 +150,5 @@ impl fmt::Debug for UdpSocket {
         self.io.fmt(f)
     }
 }
+
+impl_as_handle!(UdpSocket);

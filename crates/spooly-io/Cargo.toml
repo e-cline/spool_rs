@@ -18,8 +18,13 @@ spooly.workspace = true
 [target.'cfg(any(unix, windows))'.dependencies]
 mio = { workspace = true, features = ["os-poll", "net"] }
 
+# `SourceFd`, for `Async<T>` (Unix only).
+[target.'cfg(unix)'.dependencies]
+mio = { workspace = true, features = ["os-ext"] }
+
 [dev-dependencies]
 futures.workspace = true
+socket2.workspace = true
 
 [lints]
 workspace = true

@@ -14,6 +14,14 @@
 //!   files.
 //! - [`Driver`]: the reactor behind them, on the OS's readiness API
 //!   (epoll, kqueue, or Windows' AFD) through `mio`.
+//! - `Async<T>` (Unix): any non-blocking file descriptor on the reactor:
+//!   pipes, terminals, sockets from other crates.
+//! - [`test`](mod@test): in-memory [`duplex`](test::duplex) and [`pipe`](test::pipe)
+//!   streams, for testing protocol code without the OS (on every target).
+//!
+//! The socket types implement `AsFd` (Unix) or `AsSocket` (Windows), so
+//! [`socket2`](https://docs.rs/socket2) can set options they have no method
+//! for: `socket2::SockRef::from(&stream).set_keepalive(true)`.
 //!
 //! ```
 //! use futures::io::{AsyncReadExt, AsyncWriteExt};
@@ -68,13 +76,18 @@
 
 #![warn(unreachable_pub)]
 
+#[cfg(unix)]
+mod async_fd;
 #[cfg(any(unix, windows))]
 pub mod fs;
 #[cfg(any(unix, windows))]
 pub mod net;
 #[cfg(any(unix, windows))]
 mod reactor;
+pub mod test;
 
+#[cfg(unix)]
+pub use async_fd::Async;
 #[cfg(any(unix, windows))]
 pub use reactor::Driver;
 

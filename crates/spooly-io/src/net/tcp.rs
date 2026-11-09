@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use mio::Interest;
 
 use super::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
-use super::{ToSocketAddrs, each_addr, impl_async_stream, resolve};
+use super::{ToSocketAddrs, each_addr, impl_as_handle, impl_async_stream, resolve};
 use crate::reactor::{Direction, PollEvented};
 
 /// A TCP socket listening for connections.
@@ -274,6 +274,7 @@ impl TcpStream {
 }
 
 impl_async_stream!(TcpStream);
+impl_as_handle!(TcpListener, TcpStream);
 
 impl fmt::Debug for TcpStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
