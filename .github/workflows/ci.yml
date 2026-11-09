@@ -16,6 +16,7 @@ jobs:
   test:
     name: test (${{ matrix.os }}, ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30  # Normally ~1-2 min (stress tests weekly); fail a hang fast.
     continue-on-error: ${{ matrix.toolchain == 'beta' }}
     strategy:
       fail-fast: false
@@ -43,6 +44,7 @@ jobs:
 
   coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -54,6 +56,7 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -73,6 +76,7 @@ jobs:
   wasm:
     name: check (${{ matrix.target }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +93,7 @@ jobs:
   browser:
     name: browser (${{ matrix.browser }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -112,6 +117,7 @@ jobs:
 
   miri:
     runs-on: ubuntu-latest
+    timeout-minutes: 45  # Normally ~15 min.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

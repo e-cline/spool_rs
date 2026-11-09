@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use common::{Trace, oneshot};
 use spooly::driver::{IoDriver, current_io_driver};
-use spooly::{MockClock, Runtime};
+use spooly::{Clock, Instant, MockClock, Runtime};
 
 /// A call the loop made to the driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +66,9 @@ struct Fake {
     /// Keys that become ready during the next `wait` (not before).
     during_wait: Rc<RefCell<Vec<u32>>>,
     calls: Rc<RefCell<Vec<Call>>>,
+    /// If set, `wait` doesn't block: it advances this virtual time by its
+    /// timeout instead (see `VirtualClock`).
+    virtual_time: Option<Rc<Cell<Duration>>>,
 }
 
 impl Fake {
@@ -122,6 +125,10 @@ impl IoDriver for Fake {
 
     fn wait(&self, timeout: Option<Duration>) -> bool {
         self.calls.borrow_mut().push(Call::Wait(timeout));
+        if let (Some(time), Some(timeout)) = (&self.virtual_time, timeout) {
+            time.set(time.get() + timeout);
+            return false;
+        }
         let deadline = timeout.map(|t| std::time::Instant::now() + t);
         let mut state = self.signal.state.lock().unwrap();
         state.ready.append(&mut self.during_wait.borrow_mut());
@@ -160,6 +167,18 @@ impl IoDriver for Fake {
 
     fn is_active(&self) -> bool {
         !self.waiting.borrow().is_empty()
+    }
+}
+
+/// A clock that stands still until the fake driver's `wait` advances it:
+/// waits happen in virtual time, whatever the real speed (under Miri, say).
+/// Unlike `MockClock`, it never jumps to a deadline by itself, so the loop
+/// has to wait through the driver.
+struct VirtualClock(Rc<Cell<Duration>>);
+
+impl Clock for VirtualClock {
+    fn now(&self) -> Instant {
+        Instant::from_epoch_offset(self.0.get())
     }
 }
 
@@ -403,13 +422,31 @@ fn the_mock_clock_jumps_when_no_io_is_ready() {
 
 #[test]
 fn waits_for_a_timer_through_the_driver() {
-    let fake = Fake::default();
-    runtime(&fake).block_on(async { spooly::sleep(Duration::from_millis(10)).await });
-    assert!(
-        fake.calls()
-            .iter()
-            .any(|c| matches!(c, Call::Wait(Some(t)) if *t > Duration::ZERO))
+    let time = Rc::new(Cell::new(Duration::ZERO));
+    let fake = Fake {
+        virtual_time: Some(time.clone()),
+        ..Fake::default()
+    };
+    let rt = Runtime::builder()
+        .clock(VirtualClock(time.clone()))
+        .io_driver(fake.clone())
+        .build();
+    rt.block_on(async { spooly::sleep(Duration::from_millis(10)).await });
+    // The loop first checks for ready I/O without blocking, then waits
+    // through the driver until the deadline.
+    let waits: Vec<_> = fake
+        .calls()
+        .into_iter()
+        .filter(|c| matches!(c, Call::Wait(_)))
+        .collect();
+    assert_eq!(
+        waits,
+        [
+            Call::Wait(Some(Duration::ZERO)),
+            Call::Wait(Some(Duration::from_millis(10)))
+        ]
     );
+    assert_eq!(time.get(), Duration::from_millis(10));
 }
 
 // --- Finding the driver ---------------------------------------------------
