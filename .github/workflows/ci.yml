@@ -80,15 +80,35 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [wasm32-unknown-unknown, wasm32-wasip1]
+        target: [wasm32-unknown-unknown, wasm32-wasip2]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       # Without features. The browser job tests `wasm32-unknown-unknown`
-      # with `browser`; M10 adds the WASI tests.
+      # with `browser`, and the wasi job tests `wasm32-wasip2`.
       - run: cargo check --workspace --target ${{ matrix.target }}
+
+  wasi:
+    name: wasi (wasm32-wasip2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-wasip2
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+      - run: cargo clippy -p spooly --all-targets --target wasm32-wasip2
+      # The core's suite under wasmtime (the runner is set in
+      # .cargo/config.toml); tests that need threads or catch panics are
+      # ignored there. Not the doctests: they are merged into one binary,
+      # which the first one using a thread aborts, and they run natively.
+      # spooly-io's tests need sockets: M16.
+      - name: Test suite under wasmtime
+        run: cargo test -p spooly --target wasm32-wasip2 --lib --tests
 
   browser:
     name: browser (${{ matrix.browser }})

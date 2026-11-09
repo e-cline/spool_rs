@@ -4,7 +4,7 @@
 // `spawn(async move { h.await })` deliberately makes a separate awaiting task.
 #![allow(clippy::redundant_async_block)]
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use wasm_bindgen_test::wasm_bindgen_test as test;
 
 mod common;

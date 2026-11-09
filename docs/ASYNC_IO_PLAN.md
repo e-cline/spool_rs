@@ -10,8 +10,8 @@ Spooly runs tasks and timers today, but a task can only wait on another
 task, a timer, or a wake from another thread. This plan adds **network I/O**
 (TCP, UDP, Unix sockets) and **file I/O** on native targets, without
 changing what Spooly is: one thread, no `Send` bounds, documented ordering,
-and no runtime dependencies in the core. It also keeps WASI (and, where it
-makes sense, the browser) possible later.
+and no runtime dependencies in the core. It also keeps WASI 0.2 (and, where
+it makes sense, the browser) possible later.
 
 ---
 
@@ -55,7 +55,7 @@ makes sense, the browser) possible later.
 | File I/O | A **small, self-written blocking thread pool** in the core (`spooly::spawn_blocking`, IO17), completing over the existing remote-wake path (§6) |
 | Crate split | **Yes**: a Cargo workspace with `spooly` (the core, unchanged name) and a new **`spooly-io`** crate. The core gains one narrow, public extension point for I/O drivers (§5, §7) |
 | Loop change | An **I/O phase** after the timers phase, and drivers that wait on the reactor instead of parking the thread (§4) |
-| WASM | WASI 0.2: a second `spooly-io` backend on `wasi:io/poll`, after M10. Browser: no reactor; JS APIs are already awaitable (§8) |
+| WASM | WASI 0.2 (the only WASI version supported): a second `spooly-io` backend on `wasi:io/poll` (M16). Browser: no reactor; JS APIs are already awaitable (§8) |
 
 ---
 
@@ -561,10 +561,18 @@ later.
 
 ### 8.1 What the core already gives
 
-The core runs on `wasm32-unknown-unknown` (browser driver, M9) and builds
-for `wasm32-wasip1`; the WASI driver is M10 (deferred). `IoDriver` (§5) is
-designed so that a backend with **no threads** and **no `mio`** fits it:
-`unparker` can be a no-op, `wait` can block on the host's poll call.
+The core runs on `wasm32-unknown-unknown` (browser driver, M9) and on
+`wasm32-wasip2` (M10: `run` and `block_on`, with the core's suite under
+wasmtime in CI). `IoDriver` (§5) is designed so that a backend with **no
+threads** and **no `mio`** fits it: `unparker` can be a no-op, `wait` can
+block on the host's poll call.
+
+On WASI the core's parking driver, without an I/O driver, sleeps until the
+next timer, and panics if it would wait for a wake with no timer due,
+since nothing could deliver one (core plan D16). With an I/O driver it
+calls `IoDriver::wait` instead, as natively, so the backend below takes
+over both: `wait(None)` blocks on its pollables alone, and is the only way
+a WASI program can wait without a timer.
 
 ### 8.2 WASI 0.2 (`wasm32-wasip2`)
 
@@ -585,15 +593,15 @@ some are ready. The plan:
   threads there's no pool, so `fs` runs operations inline (they don't block
   on the network, only on the host's disk), possibly yielding between chunks.
   `spawn_blocking` isn't available there.
-- It depends on M10 (a WASI driver that steps the loop), and on choosing
-  between the `wasi` crate and `std`'s own WASI 0.2 networking
-  (`std::net` on `wasip2`) for the socket types. To be decided then (IO15).
+- M10 (the core on WASI) is done; what remains is choosing between the
+  `wasi` crate and `std`'s own WASI 0.2 networking (`std::net` on
+  `wasip2`) for the socket types (IO15).
 - **WASI 0.3** adds native async to the component model (`future`/`stream`
   types and an async ABI). That could replace the pollable backend later; it
   doesn't change the `IoDriver` shape.
-- **WASI 0.1** (`wasm32-wasip1`): `mio` supports it, but 0.1 sockets can't
-  connect, only accept on preopened listeners. Not worth a backend unless
-  someone needs it; `spooly-io` simply offers no `net` there.
+- **WASI 0.1** (`wasm32-wasip1`): **not supported** (decided in M10, core
+  plan §11.4), by the core or by `spooly-io`. `mio` supports it, but 0.1
+  sockets can't connect, only accept on preopened listeners.
 
 ### 8.3 Browser (`wasm32-unknown-unknown`)
 
@@ -741,8 +749,8 @@ to, and the "revisit if" column says what would prompt that.
 
 ## 12. Milestones
 
-These continue the core plan's numbering. M10 (WASI driver) stays deferred
-and is only a prerequisite for M16. The core plan's performance milestone,
+These continue the core plan's numbering. M10 (the core on WASI 0.2), the
+prerequisite for M16, is done. The core plan's performance milestone,
 first numbered M11, is now M17.
 
 | # | Milestone | Status | Contents |
@@ -752,5 +760,5 @@ first numbered M11, is now M17.
 | M13 | `spooly-io` net | done | The crate, `mio` reactor (IO1, §5.3), `Driver`, `run`/`block_on`, TCP/UDP/Unix, `futures-io` traits, `halves`/`into_split`, `readable`/`writable`, `unref`. Loopback tests on all three OSes; liveness and stall tests; drop and cancellation tests; an echo-server example. |
 | M14 | Blocking + fs | done | The pool and `spooly::spawn_blocking` in the core (IO7, IO17–IO19), `lookup_host` and string-address `connect`, `spooly_io::fs` (free functions, then `File`). Tests in temp dirs, pool shutdown and idle exit, panic propagation; the pool's tests run under Miri. |
 | M15 | Extras | done | `test::{duplex, pipe}`; `Async<T>` (Unix, IO20, IO22); the OS-handle traits on every socket instead of a `socket2` feature (IO21); `copy` and `scan` examples. Not done: I/O operations in the reference model through `duplex` (optional). |
-| M16 | WASI 0.2 | | After M10: the pollable backend (§8.2), `wasi:sockets`, inline `fs`; the `spooly-io` suite (minus threads) under wasmtime in CI. |
+| M16 | WASI 0.2 | | The pollable backend (§8.2), `wasi:sockets`, inline `fs`; the `spooly-io` suite (minus threads) under wasmtime in CI, next to the core's (M10), and the core's `io_driver.rs` there if a thread-free fake reactor is worth it. `wasm32-wasip2` only. |
 | — | Later | | `io_uring`, processes, signals, stdio, a web-streams adapter crate (§8.3, §10). |

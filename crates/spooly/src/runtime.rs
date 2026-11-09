@@ -1,7 +1,5 @@
 //! The runtime and its event loop.
 
-#[cfg(not(target_family = "wasm"))]
-use std::cell::OnceCell;
 use std::cell::RefCell;
 use std::fmt;
 use std::future::Future;
@@ -11,13 +9,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-#[cfg(not(target_family = "wasm"))]
-use crate::blocking::{self, Pool};
-use crate::clock::{self, Clock, Instant};
+use crate::blocking::{self, LazyPool};
+use crate::clock::{Clock, Instant};
 use crate::context;
 use crate::driver::IoDriver;
-use crate::driver::native::{self, Mode};
+use crate::driver::parking::{self, Mode};
 use crate::keep_alive::KeepAlive;
+use crate::platform::{self, Unparker};
 use crate::queue::{Callback, Microtask, Queue};
 use crate::slab::Slab;
 use crate::task::{self, BoxFuture, JoinDyn, JoinHandle, MAIN_TASK, TaskId, TaskSlot};
@@ -79,41 +77,21 @@ pub(crate) struct Inner {
     io: Option<Rc<dyn IoDriver>>,
     shared: Arc<Shared>,
     /// The blocking thread pool, created by the first `spawn_blocking`.
-    #[cfg(not(target_family = "wasm"))]
-    blocking: OnceCell<Pool>,
-    #[cfg(not(target_family = "wasm"))]
-    blocking_config: BlockingConfig,
-}
-
-/// The blocking pool's settings (`Builder::max_blocking_threads`, ...).
-#[cfg(not(target_family = "wasm"))]
-#[derive(Debug, Clone, Copy)]
-struct BlockingConfig {
-    max_threads: usize,
-    idle_timeout: Duration,
-}
-
-#[cfg(not(target_family = "wasm"))]
-impl Default for BlockingConfig {
-    fn default() -> Self {
-        BlockingConfig {
-            max_threads: blocking::DEFAULT_MAX_THREADS,
-            idle_timeout: blocking::DEFAULT_IDLE_TIMEOUT,
-        }
-    }
+    /// (A stand-in that never has jobs, on targets without threads.)
+    pub(crate) blocking: LazyPool,
 }
 
 impl Inner {
     fn new(
         clock: Rc<dyn Clock>,
         io: Option<Rc<dyn IoDriver>>,
-        #[cfg(not(target_family = "wasm"))] blocking_config: BlockingConfig,
+        blocking: blocking::Config,
     ) -> Rc<Self> {
         let id = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
-        // Remote wakes must interrupt whatever the native driver waits on.
+        // Remote wakes must interrupt whatever the parking driver waits on.
         let unpark = match &io {
             Some(io) => Unpark::Driver(io.unparker()),
-            None => Unpark::Thread(std::thread::current()),
+            None => Unpark::Platform(Unparker::current()),
         };
         Rc::new_cyclic(|this| Inner {
             this: this.clone(),
@@ -123,28 +101,13 @@ impl Inner {
             clock,
             io,
             shared: Arc::new(Shared::new(id, unpark)),
-            #[cfg(not(target_family = "wasm"))]
-            blocking: OnceCell::new(),
-            #[cfg(not(target_family = "wasm"))]
-            blocking_config,
-        })
-    }
-
-    /// The blocking pool, created on first use.
-    #[cfg(not(target_family = "wasm"))]
-    pub(crate) fn blocking_pool(&self) -> &Pool {
-        self.blocking.get_or_init(|| {
-            let config = self.blocking_config;
-            Pool::new(config.max_threads, config.idle_timeout)
+            blocking: LazyPool::new(blocking),
         })
     }
 
     /// Whether a `spawn_blocking` job is queued or running.
     pub(crate) fn has_blocking_in_flight(&self) -> bool {
-        #[cfg(not(target_family = "wasm"))]
-        return self.blocking.get().is_some_and(Pool::has_in_flight);
-        #[cfg(target_family = "wasm")]
-        return false;
+        self.blocking.has_in_flight()
     }
 
     pub(crate) fn io_driver(&self) -> Option<Rc<dyn IoDriver>> {
@@ -153,16 +116,17 @@ impl Inner {
 
     /// Blocks the thread until `timeout` (`None`: indefinitely), a remote
     /// wake, or (with an I/O driver) some I/O. May return early. Returns
-    /// `true` if I/O became ready. Only the native driver calls this.
+    /// `true` if I/O became ready. Only the parking driver calls this.
+    ///
+    /// # Panics
+    ///
+    /// On WASI, with no I/O driver and no `timeout`: nothing could ever
+    /// end the wait (see `platform::wasi`).
     pub(crate) fn wait(&self, timeout: Option<Duration>) -> bool {
-        match (&self.io, timeout) {
-            (Some(io), timeout) => io.wait(timeout),
-            (None, Some(timeout)) => {
-                std::thread::park_timeout(timeout);
-                false
-            }
-            (None, None) => {
-                std::thread::park();
+        match &self.io {
+            Some(io) => io.wait(timeout),
+            None => {
+                platform::park(timeout);
                 false
             }
         }
@@ -442,7 +406,7 @@ impl Inner {
         }
         if self.shared.is_kept_alive() {
             // Wait for a remote wake, or for the last guard to be dropped
-            // (which unparks the native driver).
+            // (which unparks the parking driver).
             return Step::WaitForWake;
         }
         // Only a pending main can keep the loop alive now, and only if a
@@ -631,7 +595,7 @@ impl Runtime {
     /// ```
     pub fn run<F: Future>(&self, future: F) -> F::Output {
         let _enter = context::enter(&self.inner);
-        native::drive(&self.inner, future, Mode::Run)
+        parking::drive(&self.inner, future, Mode::Run)
     }
 
     /// Runs `future` to completion on this runtime, driving spawned tasks
@@ -665,10 +629,10 @@ impl Runtime {
     /// ```
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         let _enter = context::enter(&self.inner);
-        native::drive(&self.inner, future, Mode::BlockOn)
+        parking::drive(&self.inner, future, Mode::BlockOn)
     }
 
-    #[cfg(all(feature = "browser", target_arch = "wasm32"))]
+    #[cfg(all(feature = "browser", target_arch = "wasm32", target_os = "unknown"))]
     pub(crate) fn inner(&self) -> &Rc<Inner> {
         &self.inner
     }
@@ -690,8 +654,7 @@ impl Runtime {
 pub struct Builder {
     clock: Option<Rc<dyn Clock>>,
     io: Option<Rc<dyn IoDriver>>,
-    #[cfg(not(target_family = "wasm"))]
-    blocking: BlockingConfig,
+    blocking: blocking::Config,
 }
 
 impl Builder {
@@ -743,14 +706,9 @@ impl Builder {
     /// Without a [`clock`](Self::clock), on a target with no default clock
     /// (see [`Runtime::new`]).
     pub fn build(self) -> Runtime {
-        let clock = self.clock.unwrap_or_else(clock::default_clock);
+        let clock = self.clock.unwrap_or_else(platform::default_clock);
         Runtime {
-            inner: Inner::new(
-                clock,
-                self.io,
-                #[cfg(not(target_family = "wasm"))]
-                self.blocking,
-            ),
+            inner: Inner::new(clock, self.io, self.blocking),
         }
     }
 }
@@ -760,9 +718,7 @@ impl fmt::Debug for Builder {
         let mut f = f.debug_struct("Builder");
         f.field("custom_clock", &self.clock.is_some())
             .field("io_driver", &self.io.is_some());
-        #[cfg(not(target_family = "wasm"))]
-        f.field("max_blocking_threads", &self.blocking.max_threads)
-            .field("blocking_idle_timeout", &self.blocking.idle_timeout);
+        self.blocking.debug_fields(&mut f);
         f.finish()
     }
 }
@@ -779,10 +735,7 @@ impl Drop for Runtime {
         // callbacks can still call `spawn` and friends.
         let _enter = context::enter_for_teardown(&self.inner);
         self.inner.tear_down();
-        #[cfg(not(target_family = "wasm"))]
-        if let Some(pool) = self.inner.blocking.get() {
-            pool.shut_down();
-        }
+        self.inner.blocking.shut_down();
         self.inner.shared.shut_down();
     }
 }
@@ -1000,6 +953,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_family = "wasm", ignore = "needs threads")]
     fn step_absorbs_a_remote_wake() {
         let rt = Runtime::new();
         let stash: Rc<RefCell<Option<Waker>>> = Rc::default();

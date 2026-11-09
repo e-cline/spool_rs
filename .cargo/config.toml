@@ -1,0 +1,4 @@
+# `cargo test --target wasm32-wasip2` runs the test binaries under wasmtime
+# (plan M10). Other targets are unaffected.
+[target.wasm32-wasip2]
+runner = "wasmtime run"

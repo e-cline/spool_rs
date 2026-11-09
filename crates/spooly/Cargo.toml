@@ -20,7 +20,7 @@ browser = ["dep:wasm-bindgen"]
 # Kept minimal: each dependency must earn its place. None are needed on
 # native targets today.
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 wasm-bindgen = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -31,7 +31,7 @@ static_assertions.workspace = true
 proptest.workspace = true
 trybuild.workspace = true
 
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 wasm-bindgen-test.workspace = true
 
 [lints]
