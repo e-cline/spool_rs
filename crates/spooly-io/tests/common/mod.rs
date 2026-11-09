@@ -2,7 +2,7 @@
 #![allow(dead_code)] // Not every test binary uses every helper.
 
 use std::future::Future;
-use std::io;
+use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -20,7 +20,10 @@ pub fn watchdog(name: &'static str) -> Watchdog {
     let (tx, rx) = mpsc::channel::<()>();
     thread::spawn(move || {
         if let Err(mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(Duration::from_secs(30)) {
-            eprintln!("test `{name}` hung for 30s; aborting");
+            // Straight to stderr: `eprintln!` output is captured by the
+            // test harness (spawned threads inherit the capture), and the
+            // abort below means it would never be shown.
+            let _ = writeln!(io::stderr(), "test `{name}` hung for 30s; aborting");
             std::process::abort();
         }
     });
