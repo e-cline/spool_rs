@@ -160,9 +160,9 @@
 //! unparked. While a detached task waits on another thread, hold a
 //! [`KeepAlive`] so that `run` doesn't exit first.
 //!
-//! For blocking or CPU-heavy work, [`spawn_blocking`] runs a closure on the
+//! For blocking or CPU-heavy work, `spawn_blocking` runs a closure on the
 //! runtime's thread pool and returns a handle that awaits its result (not
-//! on WASM, which has no threads):
+//! on WASM, which has no threads, so it isn't linked here):
 //!
 //! ```
 //! # #[cfg(not(target_family = "wasm"))]

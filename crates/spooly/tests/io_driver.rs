@@ -43,6 +43,9 @@ struct Signal {
 struct SignalState {
     ready: Vec<u32>,
     unparked: bool,
+    /// How many times `wait` has started (counted while it holds the lock,
+    /// before it blocks).
+    waits: usize,
 }
 
 /// Marks keys ready from any thread.
@@ -52,6 +55,18 @@ struct Remote(Arc<Signal>);
 impl Remote {
     fn make_ready(&self, key: u32) {
         self.0.state.lock().unwrap().ready.push(key);
+        self.0.changed.notify_all();
+    }
+
+    /// Marks `key` ready once the loop is blocked in the driver's `wait`
+    /// (not before), so the readiness has to interrupt the wait, whatever
+    /// the speed of the machine (or Miri).
+    fn make_ready_once_waiting(&self, key: u32) {
+        let mut state = self.0.state.lock().unwrap();
+        while state.waits == 0 {
+            state = self.0.changed.wait(state).unwrap();
+        }
+        state.ready.push(key);
         self.0.changed.notify_all();
     }
 }
@@ -131,6 +146,8 @@ impl IoDriver for Fake {
         }
         let deadline = timeout.map(|t| std::time::Instant::now() + t);
         let mut state = self.signal.state.lock().unwrap();
+        state.waits += 1;
+        self.signal.changed.notify_all(); // For `make_ready_once_waiting`.
         state.ready.append(&mut self.during_wait.borrow_mut());
         loop {
             if !state.ready.is_empty() {
@@ -195,12 +212,10 @@ fn mock_runtime(fake: &Fake) -> (Runtime, MockClock) {
     (rt, clock)
 }
 
-/// Makes `key` ready from another thread after `delay`.
-fn ready_later(remote: Remote, key: u32, delay: Duration) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        thread::sleep(delay);
-        remote.make_ready(key);
-    })
+/// Makes `key` ready from another thread, once the loop waits on the
+/// driver.
+fn ready_once_waiting(remote: Remote, key: u32) -> thread::JoinHandle<()> {
+    thread::spawn(move || remote.make_ready_once_waiting(key))
 }
 
 // --- The I/O phase -------------------------------------------------------
@@ -208,7 +223,7 @@ fn ready_later(remote: Remote, key: u32, delay: Duration) -> thread::JoinHandle<
 #[test]
 fn io_from_another_thread_wakes_main() {
     let fake = Fake::default();
-    let worker = ready_later(fake.remote(), 1, Duration::from_millis(20));
+    let worker = ready_once_waiting(fake.remote(), 1);
     let f = fake.clone();
     runtime(&fake).block_on(async move { f.ready(1).await });
     worker.join().unwrap();
@@ -306,7 +321,7 @@ fn a_rearming_timer_does_not_starve_io() {
 fn a_detached_task_waiting_on_io_keeps_run_alive() {
     let fake = Fake::default();
     let done = Rc::new(Cell::new(false));
-    let worker = ready_later(fake.remote(), 1, Duration::from_millis(20));
+    let worker = ready_once_waiting(fake.remote(), 1);
     let (f, d) = (fake.clone(), done.clone());
     runtime(&fake).run(async move {
         drop(spooly::spawn(async move {
