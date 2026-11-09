@@ -26,5 +26,10 @@ rustc-ice-*.txt
 # wasm-bindgen output for the browser example
 crates/spooly/examples/*/pkg/
 
+# The browser example tests (crates/spooly/e2e): their dependencies and the
+# built pages they serve
+crates/spooly/e2e/node_modules/
+crates/spooly/e2e/site/
+
 # Claude Code worktrees
 .claude/worktrees/

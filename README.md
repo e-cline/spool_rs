@@ -115,6 +115,9 @@ More pages build the same way (swap the example name):
 - [`browser_mock_clock`](crates/spooly/examples/browser_mock_clock): a test runner for time-based
   code, where a day of virtual time takes milliseconds.
 
+The pages are tested end to end, in headless Chrome, by
+[`crates/spooly/e2e`](crates/spooly/e2e) (Node and Playwright; see its README).
+
 ## Development
 
 The repository is a Cargo workspace. The core runtime is
