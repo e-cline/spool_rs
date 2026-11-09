@@ -1,0 +1,17 @@
+{
+  "name": "spooly-browser-example-tests",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end tests for the browser examples, driven by Playwright. See README.md.",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test --test-concurrency=1",
+    "check": "node build.mjs && node --test --test-concurrency=1"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "playwright-core": "1.65.0"
+  }
+}
