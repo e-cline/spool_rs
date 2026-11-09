@@ -115,6 +115,34 @@ jobs:
           # Run every test in the browser, not in Node.
           WASM_BINDGEN_USE_BROWSER: "1"
 
+  # The example pages, end to end, in Chrome (see crates/spooly/e2e/README.md).
+  browser-examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # The wasm-bindgen CLI must match the crate in Cargo.lock.
+      - id: wasm-bindgen
+        run: echo "version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wasm-bindgen.outputs.version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/spooly/e2e/package-lock.json
+      - run: npm ci
+        working-directory: crates/spooly/e2e
+      - run: npm run build
+        working-directory: crates/spooly/e2e
+      # Uses the runner's preinstalled Google Chrome.
+      - run: npm test
+        working-directory: crates/spooly/e2e
+
   miri:
     runs-on: ubuntu-latest
     timeout-minutes: 45  # Normally ~15 min.
