@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spooly: debounced search</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+    input { font-size: 1.2rem; padding: .4rem; width: 100%; box-sizing: border-box; }
+    #counts { font-family: ui-monospace, monospace; font-size: .9rem; color: #555; }
+    #results { min-height: 2rem; }
+  </style>
+</head>
+<body>
+  <h1>Debounced search</h1>
+  <p>Type a fruit. A search starts <b>250ms</b> after you stop typing and takes
+     <b>400ms</b>; typing again cancels one that is still running.</p>
+  <input id="box" placeholder="try: berry, an, pe" autocomplete="off" autofocus>
+  <p id="status">type something</p>
+  <p id="results"></p>
+  <p id="counts"></p>
+
+  <script type="module">
+    // Built by `wasm-bindgen --target web` (see main.rs).
+    import init from "./pkg/browser_debounce.js";
+    init();
+  </script>
+</body>
+</html>
