@@ -1,8 +1,10 @@
 //! The native driver behind `run` and `block_on`: steps the loop, and parks
-//! the thread while it waits for a timer or a remote wake.
+//! the thread (or waits on the I/O driver) while it waits for a timer, I/O,
+//! or a remote wake.
 
 use std::future::Future;
 use std::pin::pin;
+use std::time::Duration;
 
 use crate::clock::{Clock, Instant};
 use crate::driver::MainTask;
@@ -44,8 +46,10 @@ pub(crate) fn drive<F: Future>(inner: &Inner, future: F, mode: Mode) -> F::Outpu
         }
         match inner.step(&mut main) {
             Step::Busy => {}
-            Step::WaitUntil(deadline) => wait_until(inner.clock(), deadline),
-            Step::WaitForWake => std::thread::park(),
+            Step::WaitUntil(deadline) => wait_until(inner, deadline),
+            Step::WaitForWake => {
+                inner.wait(None);
+            }
             Step::Idle if main.is_done() => return main.take_output(),
             Step::Idle => panic!("{STALL_MESSAGE}"),
         }
@@ -53,13 +57,24 @@ pub(crate) fn drive<F: Future>(inner: &Inner, future: F, mode: Mode) -> F::Outpu
 }
 
 /// Waits until `deadline`: lets the clock jump there if it can (a
-/// `MockClock`), else parks the thread until then, or until a remote wake
-/// unparks it. (Parking may also wake spuriously; the loop just steps
+/// `MockClock`), else waits until then, or until a remote wake (or I/O)
+/// ends the wait. (A wait may also end spuriously; the loop just steps
 /// again.)
-fn wait_until(clock: &dyn Clock, deadline: Instant) {
+///
+/// With an I/O driver, I/O that is already ready comes before a clock
+/// jump (IO4): the driver is polled without blocking first, and the clock
+/// only jumps if nothing became ready and no remote wake is queued.
+fn wait_until(inner: &Inner, deadline: Instant) {
+    let clock: &dyn Clock = inner.clock();
     let now = clock.now();
-    if deadline <= now || clock.advance_when_idle(deadline) {
+    if deadline <= now {
         return;
     }
-    std::thread::park_timeout(deadline.saturating_duration_since(now));
+    if inner.has_io_driver() && (inner.wait(Some(Duration::ZERO)) || inner.has_pending_remote()) {
+        return;
+    }
+    if clock.advance_when_idle(deadline) {
+        return;
+    }
+    inner.wait(Some(deadline.saturating_duration_since(now)));
 }

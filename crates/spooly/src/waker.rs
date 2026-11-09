@@ -10,7 +10,8 @@
 //!   runtime is running. The task is pushed straight onto the microtask queue.
 //! - **Remote**: anything else (another thread, or the runtime isn't running
 //!   right now). The id goes onto a mutex-protected queue, and the runtime's
-//!   thread is unparked. The loop moves remote wakes into the microtask queue.
+//!   thread is unparked (or its I/O driver's wait is interrupted). The loop
+//!   moves remote wakes into the microtask queue.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,12 +21,30 @@ use std::thread::Thread;
 use crate::context;
 use crate::task::TaskId;
 
+/// How to interrupt the native driver's wait, from any thread.
+pub(crate) enum Unpark {
+    /// Unpark the thread that owns the runtime (the only thread that runs
+    /// it), which waits with `thread::park`.
+    Thread(Thread),
+    /// The I/O driver's unparker: the driver waits on its reactor instead.
+    Driver(Arc<dyn Fn() + Send + Sync>),
+}
+
+impl Unpark {
+    fn unpark(&self) {
+        match self {
+            Unpark::Thread(thread) => thread.unpark(),
+            Unpark::Driver(unpark) => unpark(),
+        }
+    }
+}
+
 /// Runtime state that can be touched from any thread.
 pub(crate) struct Shared {
     /// Unique per runtime, used to tell runtimes apart on the same thread.
     pub(crate) runtime_id: u64,
-    /// The thread that owns the runtime (the only thread that runs it).
-    pub(crate) thread: Thread,
+    /// Interrupts the runtime's wait.
+    unpark: Unpark,
     /// Ids woken from outside the local fast path.
     remote_queue: Mutex<Vec<TaskId>>,
     /// Fast-path flag: `true` if `remote_queue` may be non-empty.
@@ -37,10 +56,10 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub(crate) fn new(runtime_id: u64) -> Self {
+    pub(crate) fn new(runtime_id: u64, unpark: Unpark) -> Self {
         Shared {
             runtime_id,
-            thread: std::thread::current(),
+            unpark,
             remote_queue: Mutex::new(Vec::new()),
             has_remote: AtomicBool::new(false),
             alive: AtomicBool::new(true),
@@ -56,7 +75,7 @@ impl Shared {
     /// that it re-checks whether it should exit.
     pub(crate) fn release_keep_alive(&self) {
         if self.keep_alive.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.thread.unpark();
+            self.unpark.unpark();
         }
     }
 
@@ -78,7 +97,7 @@ impl Shared {
             .unwrap_or_else(|e| e.into_inner())
             .push(id);
         self.has_remote.store(true, Ordering::Release);
-        self.thread.unpark();
+        self.unpark.unpark();
         // In the browser nothing is parked: queue a step instead.
         #[cfg(all(feature = "browser", target_arch = "wasm32"))]
         crate::driver::browser::wake(self.runtime_id);

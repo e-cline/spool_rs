@@ -7,16 +7,18 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use crate::clock::{self, Clock, Instant};
 use crate::context;
+use crate::driver::IoDriver;
 use crate::driver::native::{self, Mode};
 use crate::keep_alive::KeepAlive;
 use crate::queue::{Callback, Microtask, Queue};
 use crate::slab::Slab;
 use crate::task::{self, BoxFuture, JoinDyn, JoinHandle, MAIN_TASK, TaskId, TaskSlot};
 use crate::timer::{FireAction, TimerHandle, TimerQueue};
-use crate::waker::{Shared, TaskHeader};
+use crate::waker::{Shared, TaskHeader, Unpark};
 
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -26,10 +28,12 @@ pub(crate) enum Step {
     /// More work may be ready (or main asked the step to stop early): step
     /// again.
     Busy,
-    /// Nothing to do until this deadline (the next timer), or a remote wake.
+    /// Nothing to do until this deadline (the next timer), I/O, or a
+    /// remote wake.
     WaitUntil(Instant),
-    /// Nothing to do until a remote wake: a `KeepAlive` exists, or a waker
-    /// outside the runtime might still wake a pending main.
+    /// Nothing to do until I/O or a remote wake: the I/O driver is active, a
+    /// `KeepAlive` exists, or a waker outside the runtime might still wake
+    /// a pending main.
     WaitForWake,
     /// Nothing can ever happen again. If main is still pending, it stalled.
     Idle,
@@ -67,20 +71,57 @@ pub(crate) struct Inner {
     tasks: RefCell<Slab<TaskSlot>>,
     timers: RefCell<TimerQueue>,
     clock: Rc<dyn Clock>,
+    /// The I/O driver, if any (`Builder::io_driver`).
+    io: Option<Rc<dyn IoDriver>>,
     shared: Arc<Shared>,
 }
 
 impl Inner {
-    fn new(clock: Rc<dyn Clock>) -> Rc<Self> {
+    fn new(clock: Rc<dyn Clock>, io: Option<Rc<dyn IoDriver>>) -> Rc<Self> {
         let id = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
+        // Remote wakes must interrupt whatever the native driver waits on.
+        let unpark = match &io {
+            Some(io) => Unpark::Driver(io.unparker()),
+            None => Unpark::Thread(std::thread::current()),
+        };
         Rc::new_cyclic(|this| Inner {
             this: this.clone(),
             microtasks: Queue::default(),
             tasks: RefCell::new(Slab::new()),
             timers: RefCell::new(TimerQueue::default()),
             clock,
-            shared: Arc::new(Shared::new(id)),
+            io,
+            shared: Arc::new(Shared::new(id, unpark)),
         })
+    }
+
+    pub(crate) fn io_driver(&self) -> Option<Rc<dyn IoDriver>> {
+        self.io.clone()
+    }
+
+    /// Blocks the thread until `timeout` (`None`: indefinitely), a remote
+    /// wake, or (with an I/O driver) some I/O. May return early. Returns
+    /// `true` if I/O became ready. Only the native driver calls this.
+    pub(crate) fn wait(&self, timeout: Option<Duration>) -> bool {
+        match (&self.io, timeout) {
+            (Some(io), timeout) => io.wait(timeout),
+            (None, Some(timeout)) => {
+                std::thread::park_timeout(timeout);
+                false
+            }
+            (None, None) => {
+                std::thread::park();
+                false
+            }
+        }
+    }
+
+    pub(crate) fn has_io_driver(&self) -> bool {
+        self.io.is_some()
+    }
+
+    pub(crate) fn has_pending_remote(&self) -> bool {
+        self.shared.has_pending_remote()
     }
 
     pub(crate) fn id(&self) -> u64 {
@@ -247,6 +288,17 @@ impl Inner {
         any
     }
 
+    /// The I/O phase (IO2): the driver wakes the tasks whose I/O is ready,
+    /// then the queue drains.
+    ///
+    /// Returns `(woke_any, stop)`, where `stop` means `main` asked to stop.
+    fn run_io(&self, main: &mut dyn Main) -> (bool, bool) {
+        match &self.io {
+            Some(io) if io.poll_ready() => (true, self.drain(main)),
+            _ => (false, false),
+        }
+    }
+
     /// The timers phase (§3.3). Fires the timers that are due at the phase's
     /// start, in order, draining the microtask queue after each one. Timers
     /// armed during the phase wait for the next one (D6), and a due timer
@@ -304,8 +356,9 @@ impl Inner {
     }
 
     /// One step of the event loop (D5): drains the microtask queue, absorbs
-    /// remote wakes, and runs the timers phase. Does a bounded amount of
-    /// work, never blocks, and tells the driver what to wait for.
+    /// remote wakes, and runs the timers phase, then the I/O phase. Does a
+    /// bounded amount of work, never blocks, and tells the driver what to
+    /// wait for.
     ///
     /// The caller has entered the runtime (`context::enter`).
     pub(crate) fn step(&self, main: &mut dyn Main) -> Step {
@@ -316,14 +369,24 @@ impl Inner {
             return Step::Busy;
         }
         let (fired, stop) = self.run_timers(main);
-        if fired || stop {
+        if stop {
+            return Step::Busy;
+        }
+        // The I/O phase runs even if timers fired, so a timer that keeps
+        // re-arming itself can't starve I/O (IO2).
+        let (io_woke, stop) = self.run_io(main);
+        if fired || io_woke || stop {
             return Step::Busy;
         }
 
-        // Idle: the queues are empty and no timer is due.
+        // Idle: the queues are empty, no timer is due, and no I/O is ready.
         if let Some(deadline) = self.timers.borrow_mut().next_deadline() {
             // Armed timers keep the loop alive.
             return Step::WaitUntil(deadline);
+        }
+        if self.io.as_ref().is_some_and(|io| io.is_active()) {
+            // A task waits on I/O, which the driver can wake (IO3).
+            return Step::WaitForWake;
         }
         if self.shared.is_kept_alive() {
             // Wait for a remote wake, or for the last guard to be dropped
@@ -474,7 +537,8 @@ impl Runtime {
     /// has nothing left to do. Returns `future`'s output.
     ///
     /// The loop has "nothing left to do" when the microtask queue is empty,
-    /// no timer is armed, and no [`KeepAlive`] guard exists. A detached task
+    /// no timer is armed, no task is waiting on the
+    /// [I/O driver](Builder::io_driver), and no [`KeepAlive`] guard exists. A detached task
     /// that is pending on something else (not a timer) doesn't keep the loop
     /// alive: it stays on the runtime, and is dropped
     /// with it. Hold a `KeepAlive` while such a task waits for another
@@ -573,6 +637,7 @@ impl Runtime {
 #[derive(Default)]
 pub struct Builder {
     clock: Option<Rc<dyn Clock>>,
+    io: Option<Rc<dyn IoDriver>>,
 }
 
 impl Builder {
@@ -581,6 +646,17 @@ impl Builder {
     /// [`MockClock`](crate::MockClock).
     pub fn clock(mut self, clock: impl Clock + 'static) -> Self {
         self.clock = Some(Rc::new(clock));
+        self
+    }
+
+    /// Installs `driver` as the runtime's I/O driver, which the event loop
+    /// polls in its I/O phase and waits on when it has nothing else to do.
+    /// I/O crates such as `spooly-io` provide one; see
+    /// [`IoDriver`](crate::driver::IoDriver).
+    ///
+    /// **Unstable**: this method may change in any release before 1.0.
+    pub fn io_driver(mut self, driver: impl IoDriver) -> Self {
+        self.io = Some(Rc::new(driver));
         self
     }
 
@@ -593,7 +669,7 @@ impl Builder {
     pub fn build(self) -> Runtime {
         let clock = self.clock.unwrap_or_else(clock::default_clock);
         Runtime {
-            inner: Inner::new(clock),
+            inner: Inner::new(clock, self.io),
         }
     }
 }
@@ -602,6 +678,7 @@ impl fmt::Debug for Builder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Builder")
             .field("custom_clock", &self.clock.is_some())
+            .field("io_driver", &self.io.is_some())
             .finish()
     }
 }

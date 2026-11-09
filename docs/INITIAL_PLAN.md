@@ -233,7 +233,7 @@ step() -> Step:
         fire t   (run its callback / wake its future / re-arm if interval)
         drain_microtasks()
 
-    // (future: an I/O poll phase)
+    // I/O phase, if the runtime has an I/O driver (ASYNC_IO_PLAN.md IO2, M12)
 
     return Busy | WaitUntil(next_deadline) | WaitForWake | Idle
 ```
@@ -324,7 +324,7 @@ The loop is **alive** if any of these is true:
 - the microtask queue is non-empty
 - there are active timers (`unref()` is future work)
 - there are `KeepAlive` guards; a remote wake is queued
-- (future) there are I/O registrations
+- a task is waiting on the I/O driver (ASYNC_IO_PLAN.md IO3, M12)
 
 A pending task does **not** keep the loop alive on its own: something has to
 be able to wake it.
@@ -419,7 +419,8 @@ crates/spooly/
 │   │   ├── interval.rs # Interval
 │   │   └── timeout.rs  # Timeout, Elapsed
 │   ├── clock.rs        # Instant, Clock trait, SystemClock, MockClock
-│   ├── driver.rs       # MainTask, shared by the drivers of §7
+│   ├── driver.rs       # MainTask, shared by the drivers of §7; the public
+│   │                   # IoDriver hook (M12, ASYNC_IO_PLAN.md §5)
 │   └── driver/
 │       ├── native.rs   # (M8) run / block_on: thread park, remote wakes
 │       ├── browser.rs  # (M9, feature "browser") host callbacks, JS timers

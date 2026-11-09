@@ -160,6 +160,12 @@
 //! unparked. While a detached task waits on another thread, hold a
 //! [`KeepAlive`] so that `run` doesn't exit first.
 //!
+//! ## I/O
+//!
+//! Spooly itself does no I/O. An I/O crate plugs a reactor into the loop
+//! through the (unstable) [`driver`] module: the loop polls it after the
+//! timers in each step, and waits on it when there is nothing else to do.
+//!
 //! ## In the browser
 //!
 //! On `wasm32-unknown-unknown`, enable the `browser` feature (which adds the
@@ -196,7 +202,7 @@
 pub mod browser;
 mod clock;
 mod context;
-mod driver;
+pub mod driver;
 mod keep_alive;
 mod queue;
 mod runtime;

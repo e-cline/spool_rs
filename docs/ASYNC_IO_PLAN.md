@@ -1,10 +1,10 @@
 # Spooly — Async I/O Design & Plan
 
-> Status: **v2, reviewed.** Nothing here is built yet. This document
+> Status: **v2, reviewed.** M11 and M12 are built; see §12. This document
 > expands §9.1 and §9.2 of [`INITIAL_PLAN.md`](INITIAL_PLAN.md) into a
 > design and milestones. Decisions are tagged `IO#` so they don't collide
 > with the core plan's `D#` numbers. v2 settles draft v1's open questions
-> (§11); they stay open to revisiting. M11 (the workspace) is done.
+> (§11); they stay open to revisiting.
 
 Spooly runs tasks and timers today, but a task can only wait on another
 task, a timer, or a wake from another thread. This plan adds **network I/O**
@@ -228,15 +228,16 @@ Everything else (sockets, files, the reactor itself) can live outside.
 ```rust
 /// Something the event loop can wait on besides timers (an I/O reactor).
 /// Installed with `Builder::io_driver`; one per runtime, `!Send`.
-pub trait IoDriver: 'static {
+pub trait IoDriver: Any {
     /// The I/O phase (IO2): wake every task whose I/O is ready, without
     /// blocking. Returns `true` if it woke anything.
     fn poll_ready(&self) -> bool;
 
     /// Blocks until some I/O is ready, `timeout` passes, or the unparker is
     /// called. Records what's ready for the next `poll_ready`; wakes
-    /// nothing. Only drivers that may block (the native one) call this.
-    fn wait(&self, timeout: Option<Duration>);
+    /// nothing. Returns `true` if I/O became ready. Only drivers that may
+    /// block (the native one) call this.
+    fn wait(&self, timeout: Option<Duration>) -> bool;
 
     /// A handle another thread can call to end a `wait` early (remote wakes,
     /// the last `KeepAlive` dropping).
@@ -260,14 +261,23 @@ Inside the core:
 - `Shared::thread: Thread` becomes an unparker: the thread's `unpark` by
   default, or the driver's `unparker()`. `push_remote` and
   `release_keep_alive` call it.
-- `Inner` holds `Option<Rc<dyn IoDriver>>` (stored as `Rc<dyn Any>` too, for
-  `current_io_driver`'s downcast).
+- `Inner` holds `Option<Rc<dyn IoDriver>>`. `IoDriver: Any`, so
+  `current_io_driver` upcasts it to `Rc<dyn Any>` and downcasts, with no
+  `unsafe`.
 - `step()` gains the I/O phase and the `is_active()` check (§4.2).
 - The native driver calls `io.wait(..)` instead of parking when a driver is
   installed (IO4 for `MockClock`).
 - The browser driver ignores `wait` (it never blocks), but still runs
   `poll_ready` through the step. A browser runtime with an I/O driver isn't a
   goal, but nothing forbids it.
+
+*As built (M12):* `wait` returns whether I/O became ready. IO4 needs that
+signal: without it, the native driver couldn't tell a zero-timeout wait that
+found I/O from one that found nothing, and would alternate between the two
+and an empty step forever instead of letting a `MockClock` jump. The
+remote-wake path holds an `Unpark` (the thread, or the driver's unparker).
+`tests/io_driver.rs` checks the hook with a fake reactor whose `wait`
+blocks on a condition variable.
 
 This is about 100 lines in the core, all safe, and it's the same hook an
 embedder needs to fold Spooly into a GUI or game loop: it moves the "public
@@ -608,7 +618,7 @@ and is only a prerequisite for M16.
 | # | Milestone | Status | Contents |
 |---|---|---|---|
 | M11 | Workspace | done | Move the crate to `crates/spooly`; root `[workspace]` with shared package fields, lints and dependencies; CI with `--workspace`. No code change; every test passes unchanged. |
-| M12 | Core hook | | `spooly::driver::IoDriver`, `Builder::io_driver`, `current_io_driver`; the unparker in `Shared`; the I/O phase and `is_active` in `step()` (IO2, IO3); native driver waits through the driver and handles `MockClock` (IO4). Tested with a fake in-crate driver (scripted readiness, a counting unparker): phase order, timers-plus-I/O fairness, liveness, remote wakes interrupting `wait`. No behavior change without a driver; model and browser suites unchanged. |
+| M12 | Core hook | done | `spooly::driver::IoDriver`, `Builder::io_driver`, `current_io_driver`; the unparker in `Shared`; the I/O phase and `is_active` in `step()` (IO2, IO3); native driver waits through the driver and handles `MockClock` (IO4). Tested with a fake in-crate driver (scripted readiness, a counting unparker): phase order, timers-plus-I/O fairness, liveness, remote wakes interrupting `wait`. No behavior change without a driver; model and browser suites unchanged. |
 | M13 | `spooly-io` net | | The crate, `mio` reactor (IO1, §5.3), `Driver`, `run`/`block_on`, TCP/UDP/Unix, `futures-io` traits, `split`, `readable`/`writable`, `unref`. Loopback tests on all three OSes; liveness and stall tests; drop and cancellation tests; an echo-server example. |
 | M14 | Blocking + fs | | The pool, `spawn_blocking` (IO7), `lookup_host` and string-address `connect`, `spooly_io::fs` (free functions, then `File`). Tests in temp dirs, pool shutdown and idle exit, panic propagation. |
 | M15 | Extras | | `test::{duplex, pipe}`; `Async<T>`; `socket2` feature; I/O operations in the reference model through `duplex` (optional). |

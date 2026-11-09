@@ -46,6 +46,10 @@ semantics.
 > and the crate builds for `wasm32-unknown-unknown` and `wasm32-wasip1`),
 > and M9 (the browser driver). Next: M10, WASI. See
 > [`docs/INITIAL_PLAN.md`](docs/INITIAL_PLAN.md) §12.
+>
+> Async I/O is in progress ([`docs/ASYNC_IO_PLAN.md`](docs/ASYNC_IO_PLAN.md)):
+> M11 (a Cargo workspace) and M12 (an I/O driver hook in the core) are
+> done. Next: M13, the `spooly-io` crate with networking.
 
 The crate docs (`cargo doc --open`) are the guide: the closest JS
 counterparts, the event loop, cancellation, panics, threads, and testing
