@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spooly: mock clock tests</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
+    table { border-collapse: collapse; width: 100%; font-size: .95rem; }
+    td { padding: .35rem .6rem; border-bottom: 1px solid #ddd; }
+    td:first-child { font-family: ui-monospace, monospace; width: 3.5rem; }
+    td:last-child { color: #555; }
+    tr.pass td:first-child { color: #1a7f37; }
+    tr.FAIL td:first-child { color: #cf222e; font-weight: bold; }
+    #summary { font-weight: 600; margin: 1rem 0; }
+  </style>
+</head>
+<body>
+  <h1>Time-based tests, run instantly</h1>
+  <p>These tests wait for seconds, hours and a whole day, on a <code>MockClock</code>.
+     Virtual time jumps to the next timer, so none of them waits.</p>
+  <table><tbody id="rows"></tbody></table>
+  <p id="summary">loading...</p>
+  <button id="again">Run again</button>
+
+  <script type="module">
+    // Built by `wasm-bindgen --target web` (see main.rs).
+    import init from "./pkg/browser_mock_clock.js";
+    init();
+  </script>
+</body>
+</html>

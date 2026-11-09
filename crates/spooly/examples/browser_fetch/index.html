@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spooly: fetch bridge</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; }
+    #log { list-style: none; padding: 0; font-family: ui-monospace, monospace; font-size: .9rem; white-space: pre-wrap; }
+    #log li { padding: .1rem 0; }
+  </style>
+</head>
+<body>
+  <h1>Fetch bridge</h1>
+  <p>A JS <code>fetch</code> as a Spooly future. Dropping the future aborts the request.</p>
+  <ul id="log"></ul>
+  <p>
+    <button id="start">Start a slow request (3s)</button>
+    <button id="cancel">Cancel it</button>
+  </p>
+
+  <script type="module">
+    // Built by `wasm-bindgen --target web` (see main.rs).
+    import init from "./pkg/browser_fetch.js";
+    init();
+  </script>
+</body>
+</html>

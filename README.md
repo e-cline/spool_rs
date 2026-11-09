@@ -72,6 +72,9 @@ cargo run --example event_loop_order  # sync code, microtasks, spawn, yield_now,
 cargo run --example mock_clock     # MockClock: retries with backoff, hours of timers in microseconds
 cargo run --example channel        # a bounded `!Send` channel from scratch, with backpressure
 cargo run --example actor          # a task owning its state, with request/reply and no locks
+cargo run --example race_and_join  # `race` and `join_all` in a few lines, without `select!`
+cargo run --example graceful_shutdown  # stop taking work, drain within a grace period, then abort
+cargo run --example blocking_pool  # spawn_blocking: a heartbeat that keeps ticking, a pool of one
 cargo run -p spooly-io --example echo   # an echo server and clients on one thread
 cargo run -p spooly-io --example copy   # a file copy on the blocking pool, with a ticker running meanwhile
 cargo run -p spooly-io --example scan   # a concurrent TCP port scan with timeouts
@@ -102,11 +105,15 @@ wasm-bindgen --target web --out-dir crates/spooly/examples/browser/pkg \
 python3 -m http.server -d crates/spooly/examples/browser   # then open http://localhost:8000
 ```
 
-Two more pages build the same way (swap the example name):
-[`browser_debounce`](crates/spooly/examples/browser_debounce) (a debounced search box, with
-`Sleep::reset` and cancelling a stale search) and
-[`browser_yield`](crates/spooly/examples/browser_yield) (why `yield_now` doesn't keep a page
-responsive, and what does).
+More pages build the same way (swap the example name):
+- [`browser_debounce`](crates/spooly/examples/browser_debounce): a debounced search box, with
+  `Sleep::reset` and cancelling a stale search.
+- [`browser_yield`](crates/spooly/examples/browser_yield): why `yield_now` doesn't keep a page
+  responsive, and what does.
+- [`browser_fetch`](crates/spooly/examples/browser_fetch): a JS `fetch` as a Spooly future, where
+  dropping the future (a `timeout`, a cancelled task) aborts the request.
+- [`browser_mock_clock`](crates/spooly/examples/browser_mock_clock): a test runner for time-based
+  code, where a day of virtual time takes milliseconds.
 
 ## Development
 
